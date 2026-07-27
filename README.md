@@ -19,7 +19,13 @@ python -m pip install -r requirements.txt
 python .\main.py
 ```
 
-Windows 下也可以直接双击仓库根目录的 `start_overlay_measure.bat` 启动软件；如果缺少依赖，先执行上面的安装命令。
+Windows 下可以直接双击仓库根目录的 `start_overlay_measure.bat`。启动器会在当前项目根目录创建独立的 `.venv`，首次运行时自动安装并校验 `requirements.txt` 中的依赖，然后启动软件。后续运行会复用该环境；只有依赖文件变化或环境损坏时才会重新安装。
+
+自动安装仍要求电脑已安装 64 位 Python 3.10-3.13。首次安装依赖需要能够访问配置的 Python 软件源。需要强制重新安装依赖时，可在 PowerShell 中执行：
+
+```powershell
+.\start_overlay_measure.bat -ForceInstall
+```
 
 正式发布包使用：
 
@@ -53,7 +59,8 @@ python -m pip install -r requirements.lock.txt
 - `overlay_measure/`: 主程序模块。
 - `sample_data/`: 示例图片和示例 recipe。
 - `main.py`: GUI 启动入口。
-- `start_overlay_measure.bat`: Windows 双击启动文件。
+- `start_overlay_measure.bat`: Windows 一键环境初始化和启动入口。
+- `scripts/bootstrap_and_run.ps1`: 创建项目虚拟环境、安装和校验依赖并启动 GUI。
 - `requirements.txt`: Python 依赖。
 - `legacy/v1.0.5/`: 更新前仓库版本归档，用于回看旧版本文件。
 - `CHANGELOG.md`: 版本更替记录。
