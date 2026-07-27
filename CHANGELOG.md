@@ -1,5 +1,12 @@
 # Changelog
 
+## V1.8.0
+
+- Split the former 5000-line UI module into focused component, builder, state, workflow, recipe-view, recipe-action, and worker modules.
+- Kept `overlay_measure.ui_main.MainWindow`, existing widget imports, `main.py`, recipes, and measurement behavior backward compatible.
+- Made worker-to-window signal delivery explicitly queued after the mixin split so all Qt UI updates remain on the GUI thread.
+- Kept headless regression runs from invoking unsupported offscreen window capture while preserving production trace screenshots.
+
 ## V1.7.2
 
 - Fixed the Analyze ROI button signal so Qt's unchecked-state argument can no longer silently disable user-facing result and error dialogs.
