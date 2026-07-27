@@ -4,13 +4,13 @@
 
 ## 当前版本
 
-- 当前代码版本：V1.8.0
+- 当前代码版本：V1.8.1
 - 来源文件：`overlay_mark_measure_v1_4_2.zip`
 - Windows 启动文件：`start_overlay_measure.bat`
 - Python 主入口：`main.py`
 - 主界面代码：`overlay_measure/ui_main.py`
 
-V1.8.0 完成界面架构拆分。原先超过 5000 行的 `ui_main.py` 现在只保留应用入口、主窗口状态初始化和兼容导出；图像组件、界面构建、状态同步、测量流程、配方界面、配方操作和后台任务分别维护。现有启动入口和外部导入方式保持兼容，测量算法与结果定义没有改变。
+V1.8.1 在 V1.8.0 模块化架构基础上增加正式 Windows 安装与升级构建链。发布脚本会运行测试、构建文件夹式应用、执行打包后启动检查、生成单文件 Setup 安装程序，并输出带 SHA256 的更新清单。同一安装标识支持后续完整安装包覆盖升级，配方、日志和测量结果不存放在程序安装目录。
 
 ## 运行
 
@@ -20,6 +20,14 @@ python .\main.py
 ```
 
 Windows 下也可以直接双击仓库根目录的 `start_overlay_measure.bat` 启动软件；如果缺少依赖，先执行上面的安装命令。
+
+正式发布包使用：
+
+```powershell
+.\scripts\build_release.bat -Python "D:\python\python.exe"
+```
+
+输出位于 `release\`。详细说明见 [`installer/README.md`](installer/README.md)。
 
 如需生产环境完全复现当前依赖，可使用：
 

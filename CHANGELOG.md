@@ -1,5 +1,12 @@
 # Changelog
 
+## V1.8.1
+
+- Added a reproducible PyInstaller one-folder build that keeps application dependencies isolated while avoiding one-file startup extraction and antivirus friction.
+- Added an Inno Setup installer with a stable AppId, Program Files installation, shortcuts, uninstall support, application shutdown during upgrade, and in-place full-installer upgrades.
+- Added a release script that runs tests, generates Windows version metadata, builds the application, performs a packaged smoke launch, compiles Setup, and emits SHA256 update metadata.
+- Kept recipes, runtime logs, recovery state, and measurement exports outside the installation directory so upgrades do not overwrite operator data.
+
 ## V1.8.0
 
 - Split the former 5000-line UI module into focused component, builder, state, workflow, recipe-view, recipe-action, and worker modules.

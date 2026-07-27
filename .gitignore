@@ -15,6 +15,10 @@ export/
 exports/
 design_qa/
 artifacts/
+build/
+dist/
+release/
+installer/generated_version_info.txt
 导出结果/
 
 # Generated measurement outputs and saved production recipes

@@ -128,7 +128,7 @@ class MainWindow(
             if font_path.exists() and QFontDatabase.addApplicationFont(str(font_path)) >= 0:
                 break
         self.setFont(QFont("Microsoft YaHei UI", 9))
-        self.setWindowTitle("对位偏差测量软件 V1.8.0")
+        self.setWindowTitle("对位偏差测量软件 V1.8.1")
         self.setWindowFlags(Qt.Window | Qt.FramelessWindowHint)
         self.setMinimumSize(1120, 720)
         self.resize(1500, 920)
@@ -436,7 +436,19 @@ class MainWindow(
 
 
 def run_app():
+    smoke_test = "--smoke-test" in sys.argv
+    if smoke_test:
+        # The packaged release builder uses the offscreen platform to verify
+        # that Qt plugins and all modular UI imports are present.
+        import os
+
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
     app = QApplication(sys.argv)
     win = MainWindow()
     win.show()
-    sys.exit(app.exec())
+    if smoke_test:
+        QTimer.singleShot(300, app.quit)
+    return_code = app.exec()
+    if smoke_test:
+        return return_code
+    sys.exit(return_code)
