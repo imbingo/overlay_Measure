@@ -2,11 +2,13 @@
 
 ## V1.8.2
 
-- Changed manual and automatic calipers from persistent result overlays into on-demand editing aids: completed detections hide calipers regardless of quality grade.
-- Added fixed-screen-tolerance hit testing so clicking a fitted circle, rectangle, contour, or center cross reveals only that feature's calipers; clicking blank canvas hides them again.
-- Kept calipers visible after complete recognition failure, cleared stale selections when context or results change, and preserved existing ROI editing behavior after a manual feature is selected.
-- Decoupled edge-point diagnostics from caliper visibility so accepted points, rejected red crosses, fitted contours, centers, and quality details remain independently inspectable.
-- Added a dedicated application icon for the Qt window, packaged executable, Setup installer, Start menu entry, and desktop shortcut.
+- 将手动与自动卡尺从持续显示的测量结果覆盖层改为按需显示的编辑辅助；只要生成识别结果，无论质量等级如何都会自动隐藏。
+- 增加固定屏幕像素容差的命中检测；点击拟合圆、矩形、轮廓或中心十字只显示该特征卡尺，点击空白区域再次隐藏。
+- 完全识别失败时继续显示手动卡尺；切换上下文或识别结果变化时清除旧选中状态，并保留手动 ROI 的原有编辑行为。
+- 将边缘点诊断与卡尺可见性分离，有效点、红色剔除点、拟合轮廓、中心和质量信息可以独立查看。
+- 增加专用黑灰光圈/靶标应用图标，覆盖 Qt 窗口、打包 EXE、Setup、开始菜单和桌面快捷方式。
+- 不修改测量算法、质量门槛、Recipe 数据结构和导出字段。
+- 通过 66 项 pytest、Qt 离屏测试、Setup 实际安装、安装后启动和卸载验证。
 
 ## V1.8.1
 
