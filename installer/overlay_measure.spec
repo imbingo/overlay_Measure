@@ -6,6 +6,8 @@ from pathlib import Path
 project_root = Path(SPECPATH).parent
 version_file = project_root / "installer" / "generated_version_info.txt"
 sample_data = project_root / "sample_data"
+assets = project_root / "assets"
+application_icon = assets / "overlay_measure.ico"
 
 if not version_file.exists():
     raise SystemExit(
@@ -17,7 +19,10 @@ a = Analysis(
     [str(project_root / "main.py")],
     pathex=[str(project_root)],
     binaries=[],
-    datas=[(str(sample_data), "sample_data")],
+    datas=[
+        (str(sample_data), "sample_data"),
+        (str(assets), "assets"),
+    ],
     hiddenimports=[
         "PySide6.QtCore",
         "PySide6.QtGui",
@@ -60,6 +65,7 @@ exe = EXE(
     codesign_identity=None,
     entitlements_file=None,
     version=str(version_file),
+    icon=str(application_icon),
 )
 
 coll = COLLECT(

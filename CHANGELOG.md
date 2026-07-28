@@ -1,5 +1,13 @@
 # Changelog
 
+## V1.8.2
+
+- Changed manual and automatic calipers from persistent result overlays into on-demand editing aids: completed detections hide calipers regardless of quality grade.
+- Added fixed-screen-tolerance hit testing so clicking a fitted circle, rectangle, contour, or center cross reveals only that feature's calipers; clicking blank canvas hides them again.
+- Kept calipers visible after complete recognition failure, cleared stale selections when context or results change, and preserved existing ROI editing behavior after a manual feature is selected.
+- Decoupled edge-point diagnostics from caliper visibility so accepted points, rejected red crosses, fitted contours, centers, and quality details remain independently inspectable.
+- Added a dedicated application icon for the Qt window, packaged executable, Setup installer, Start menu entry, and desktop shortcut.
+
 ## V1.8.1
 
 - Added a reproducible PyInstaller one-folder build that keeps application dependencies isolated while avoiding one-file startup extraction and antivirus friction.

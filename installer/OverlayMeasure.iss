@@ -1,5 +1,5 @@
 #ifndef AppVersion
-  #define AppVersion "1.8.1"
+  #define AppVersion "1.8.2"
 #endif
 
 #define AppName "对位偏差测量软件"
@@ -28,6 +28,7 @@ CloseApplications=force
 RestartApplications=no
 UsePreviousAppDir=yes
 UninstallDisplayIcon={app}\{#AppExeName}
+SetupIconFile=..\assets\overlay_measure.ico
 SetupLogging=yes
 VersionInfoVersion={#AppVersion}
 VersionInfoCompany={#AppPublisher}

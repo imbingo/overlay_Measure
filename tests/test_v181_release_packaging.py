@@ -22,6 +22,11 @@ def test_installer_uses_onedir_and_stable_upgrade_identity():
     assert "{c27d6ac0-0b46-4782-9a97-04f96bcdfcd8}" in iss
     assert "UsePreviousAppDir=yes" in iss
     assert "CloseApplications=force" in iss
+    assert 'icon=str(application_icon)' in spec
+    assert '(str(assets), "assets")' in spec
+    assert "SetupIconFile=..\\assets\\overlay_measure.ico" in iss
+    assert (ROOT / "assets" / "overlay_measure_icon.png").is_file()
+    assert (ROOT / "assets" / "overlay_measure.ico").is_file()
 
 
 def test_release_metadata_contains_hash_and_full_installer_policy(tmp_path):
@@ -30,7 +35,7 @@ def test_release_metadata_contains_hash_and_full_installer_policy(tmp_path):
     manifest = tmp_path / "update_manifest.json"
     version_info = tmp_path / "version_info.txt"
 
-    assert version_tuple(__version__) == (1, 8, 1, 0)
+    assert version_tuple(__version__) == (1, 8, 2, 0)
     write_version_info(version_info, __version__)
     write_manifest(manifest, artifact, __version__)
 

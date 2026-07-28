@@ -11,7 +11,7 @@ from typing import Dict, Optional
 import numpy as np
 from PIL import Image
 from PySide6.QtCore import QObject, QPoint, QPointF, QRectF, QThread, QTimer, Qt, QUrl, Signal, Slot
-from PySide6.QtGui import QAction, QColor, QDesktopServices, QFont, QFontDatabase, QImage, QPainter, QPainterPath, QPen, QPixmap, QPolygonF
+from PySide6.QtGui import QAction, QColor, QDesktopServices, QFont, QFontDatabase, QIcon, QImage, QPainter, QPainterPath, QPen, QPixmap, QPolygonF
 from PySide6.QtWidgets import (
     QApplication,
     QDialog,
@@ -92,6 +92,11 @@ from .ui_workflows import MainWindowWorkflowMixin
 from .ui_recipe_actions import MainWindowRecipeMixin
 
 
+def application_icon_path() -> Path:
+    runtime_root = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parents[1]))
+    return runtime_root / "assets" / "overlay_measure_icon.png"
+
+
 
 
 
@@ -128,7 +133,10 @@ class MainWindow(
             if font_path.exists() and QFontDatabase.addApplicationFont(str(font_path)) >= 0:
                 break
         self.setFont(QFont("Microsoft YaHei UI", 9))
-        self.setWindowTitle("对位偏差测量软件 V1.8.1")
+        self.setWindowTitle("对位偏差测量软件 V1.8.2")
+        icon_path = application_icon_path()
+        if icon_path.exists():
+            self.setWindowIcon(QIcon(str(icon_path)))
         self.setWindowFlags(Qt.Window | Qt.FramelessWindowHint)
         self.setMinimumSize(1120, 720)
         self.resize(1500, 920)
@@ -444,6 +452,9 @@ def run_app():
 
         os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
     app = QApplication(sys.argv)
+    icon_path = application_icon_path()
+    if icon_path.exists():
+        app.setWindowIcon(QIcon(str(icon_path)))
     win = MainWindow()
     win.show()
     if smoke_test:

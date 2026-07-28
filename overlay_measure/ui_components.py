@@ -202,6 +202,9 @@ class ImageCanvas(QLabel):
         self.auto_reference_label = ""
         self.auto_target_label = ""
         self.show_diagnostics = False
+        self.selected_caliper_feature = None
+        self.selected_caliper_detection_id = None
+        self.caliper_selection_context = None
         self.display_enhancement = False
         self.pixel_size_x_um = 0.1
         self.pixel_size_y_um = 0.1
@@ -223,6 +226,7 @@ class ImageCanvas(QLabel):
         self.setStyleSheet("QLabel { background: #252930; color: #F5F6F8; border: 1px solid #363C45; border-radius: 6px; }")
 
     def set_image(self, image: Optional[ImageData]):
+        self.clear_caliper_selection(update=False)
         self.image = image
         self.pixmap_cache = None
         self.reset_view(update=False)
@@ -266,8 +270,13 @@ class ImageCanvas(QLabel):
         pixel_size_y_um: float = 0.1,
         show_diagnostics: bool = False,
     ):
+        next_layer = self.fixed_layer or active_layer
+        next_context = ("auto" if show_auto_detections else "manual", active_mark_id, next_layer)
+        if self.caliper_selection_context != next_context:
+            self.clear_caliper_selection(update=False)
+        self.caliper_selection_context = next_context
         self.active_mark_id = active_mark_id
-        self.active_layer = self.fixed_layer or active_layer
+        self.active_layer = next_layer
         self.active_roi_type = roi_type
         self.active_roi_inner_ratio = float(roi_inner_ratio)
         self.active_roi_target_edge = roi_target_edge
@@ -287,7 +296,82 @@ class ImageCanvas(QLabel):
         self.pixel_size_x_um = float(pixel_size_x_um)
         self.pixel_size_y_um = float(pixel_size_y_um)
         self.show_diagnostics = bool(show_diagnostics)
+        self._drop_stale_caliper_selection()
         self.update()
+
+    def clear_caliper_selection(self, update: bool = True):
+        self.selected_caliper_feature = None
+        self.selected_caliper_detection_id = None
+        if update:
+            self.update()
+
+    @staticmethod
+    def _detection_has_calipers(detection: Optional[DetectionResult]) -> bool:
+        if detection is None:
+            return False
+        return bool(detection.shape_params.get("caliper_windows")) or detection.fitting_mode == "CaliperCircle"
+
+    def _selected_detection(self) -> Optional[DetectionResult]:
+        if not self.selected_caliper_feature:
+            return None
+        mode, identity, layer = self.selected_caliper_feature
+        if mode == "auto":
+            return self.auto_detections.get(identity, {}).get(layer)
+        return self.detections.get(identity, {}).get(layer)
+
+    def _drop_stale_caliper_selection(self):
+        if not self.selected_caliper_feature:
+            return
+        detection = self._selected_detection()
+        if detection is None or id(detection) != self.selected_caliper_detection_id:
+            self.clear_caliper_selection(update=False)
+
+    def _select_caliper_detection(self, mode: str, identity: str, layer: str, detection: DetectionResult):
+        self.selected_caliper_feature = (mode, identity, layer)
+        self.selected_caliper_detection_id = id(detection)
+        self.update()
+
+    def _manual_caliper_selected(self, mark_id: str, layer: str, detection: Optional[DetectionResult]) -> bool:
+        return (
+            detection is not None
+            and self.selected_caliper_feature == ("manual", mark_id, layer)
+            and self.selected_caliper_detection_id == id(detection)
+        )
+
+    def _auto_caliper_selected(self, label: str, layer: str, detection: Optional[DetectionResult]) -> bool:
+        return (
+            detection is not None
+            and self.selected_caliper_feature == ("auto", label, layer)
+            and self.selected_caliper_detection_id == id(detection)
+        )
+
+    def _manual_roi_visible(
+        self,
+        mark_id: str,
+        layer: str,
+        roi: Optional[Roi],
+        detection: Optional[DetectionResult],
+    ) -> bool:
+        if roi is None:
+            return False
+        if getattr(roi, "roi_type", "") != "Caliper Circle" or detection is None:
+            return True
+        return self._manual_caliper_selected(mark_id, layer, detection)
+
+    def _has_caliper_result_for_hint(self) -> bool:
+        if self.show_auto_detections:
+            return any(
+                self._detection_has_calipers(detection)
+                for layer_map in self.auto_detections.values()
+                for detection in layer_map.values()
+            )
+        detection = self.detections.get(self.active_mark_id, {}).get(self.active_layer)
+        roi = self._active_roi()
+        return (
+            roi is not None
+            and getattr(roi, "roi_type", "") == "Caliper Circle"
+            and detection is not None
+        )
 
     def _mean_pixel_size_um(self) -> float:
         return 0.5 * (self.pixel_size_x_um + self.pixel_size_y_um)
@@ -310,6 +394,97 @@ class ImageCanvas(QLabel):
             detection.center_x_px + radius * 0.70,
             detection.center_y_px - radius * 0.70,
         )
+
+    @staticmethod
+    def _point_segment_distance(px: float, py: float, start: QPointF, end: QPointF) -> float:
+        ax, ay = float(start.x()), float(start.y())
+        bx, by = float(end.x()), float(end.y())
+        dx, dy = bx - ax, by - ay
+        denominator = dx * dx + dy * dy
+        if denominator <= 1e-12:
+            return float(np.hypot(px - ax, py - ay))
+        t = float(np.clip(((px - ax) * dx + (py - ay) * dy) / denominator, 0.0, 1.0))
+        return float(np.hypot(px - (ax + t * dx), py - (ay + t * dy)))
+
+    def _polyline_hit_distance(self, pos, points, closed: bool = True) -> float:
+        if not points or len(points) < 2:
+            return float("inf")
+        widget_points = [
+            QPointF(*self.image_to_widget(float(point[0]), float(point[1])))
+            for point in points
+        ]
+        pairs = list(zip(widget_points, widget_points[1:]))
+        if closed and len(widget_points) > 2:
+            pairs.append((widget_points[-1], widget_points[0]))
+        return min(
+            self._point_segment_distance(float(pos.x()), float(pos.y()), start, end)
+            for start, end in pairs
+        )
+
+    def _detection_hit_distance(self, detection: DetectionResult, pos) -> float:
+        """Return distance in widget pixels so hit tolerance is zoom independent."""
+        cx, cy = self.image_to_widget(detection.center_x_px, detection.center_y_px)
+        center_distance = float(np.hypot(float(pos.x()) - cx, float(pos.y()) - cy))
+        if center_distance <= 12.0:
+            return center_distance
+
+        if detection.fitting_mode in {"Circle", "EdgeCenter", "CaliperCircle", "ProductionCircle"}:
+            radius = float(detection.shape_params.get("radius_px", detection.diameter_px / 2.0))
+            radial_distance = float(np.hypot(float(pos.x()) - cx, float(pos.y()) - cy))
+            return abs(radial_distance - radius * self.scale)
+
+        if detection.fitting_mode in {"Rectangle", "ProductionRectangle"}:
+            width = float(detection.shape_params.get("width_px", detection.diameter_px))
+            height = float(detection.shape_params.get("height_px", detection.diameter_px))
+            angle = float(detection.shape_params.get("angle_deg", 0.0))
+            points = self._rotated_rect_points_widget(
+                detection.center_x_px,
+                detection.center_y_px,
+                width,
+                height,
+                angle,
+            )
+            pairs = list(zip(points, points[1:] + points[:1]))
+            return min(
+                self._point_segment_distance(float(pos.x()), float(pos.y()), start, end)
+                for start, end in pairs
+            )
+
+        contour = detection.shape_params.get(
+            "candidate_contour_points",
+            detection.shape_params.get("contour_points", detection.edge_points),
+        )
+        return self._polyline_hit_distance(pos, contour)
+
+    def _manual_caliper_hit(self, pos, tolerance_px: float = 9.0):
+        mark_id = self.active_mark_id
+        layer = self.active_layer
+        roi = self._active_roi()
+        detection = self.detections.get(mark_id, {}).get(layer)
+        if (
+            roi is None
+            or getattr(roi, "roi_type", "") != "Caliper Circle"
+            or not self._detection_has_calipers(detection)
+        ):
+            return None
+        if self._detection_hit_distance(detection, pos) <= tolerance_px:
+            return mark_id, layer, detection
+        return None
+
+    def _nearest_auto_caliper_hit(self, pos, tolerance_px: float = 9.0):
+        best = None
+        best_distance = tolerance_px
+        for label, layer_map in self.auto_detections.items():
+            for layer, detection in layer_map.items():
+                if self.fixed_layer and layer != self.fixed_layer:
+                    continue
+                if not self._detection_has_calipers(detection):
+                    continue
+                distance = self._detection_hit_distance(detection, pos)
+                if distance <= best_distance:
+                    best = (label, layer, detection)
+                    best_distance = distance
+        return best
 
     def set_circle_pick_mode(self, enabled: bool):
         self.circle_pick_mode = enabled
@@ -723,6 +898,16 @@ class ImageCanvas(QLabel):
             painter.fillRect(hint_rect, QColor(18, 21, 26, 205))
             painter.setPen(QColor("#7EE787"))
             painter.drawText(hint_rect.adjusted(8, 0, -8, 0), Qt.AlignVCenter | Qt.AlignLeft, hint)
+        elif self._has_caliper_result_for_hint():
+            hint = (
+                "卡尺调整中 · 点击空白处隐藏"
+                if self.selected_caliper_feature
+                else "点击拟合轮廓显示卡尺，点击空白处隐藏"
+            )
+            hint_rect = QRectF(12, self.height() - 76, min(330, self.width() - 24), 28)
+            painter.fillRect(hint_rect, QColor(18, 21, 26, 205))
+            painter.setPen(QColor("#7EE787"))
+            painter.drawText(hint_rect.adjusted(8, 0, -8, 0), Qt.AlignVCenter | Qt.AlignLeft, hint)
         self._draw_scale_and_axes(painter)
         painter.end()
 
@@ -770,13 +955,7 @@ class ImageCanvas(QLabel):
                 roi = mark.upper_roi if layer == "upper" else mark.lower_roi
                 det = self.detections.get(mark_id, {}).get(layer)
                 detection_valid = det is not None and det.shape_params.get("quality_status", "Valid") != "Invalid"
-                hide_completed_caliper = (
-                    roi is not None
-                    and getattr(roi, "roi_type", "") == "Caliper Circle"
-                    and detection_valid
-                    and not self.show_diagnostics
-                )
-                if roi is not None and not hide_completed_caliper:
+                if self._manual_roi_visible(mark_id, layer, roi, det):
                     is_active = (mark_id == self.active_mark_id and layer == self.active_layer)
                     self._draw_roi_shape(painter, roi, colors[layer], is_active, f"{mark_id} {LAYER_LABELS[layer]}")
 
@@ -993,7 +1172,7 @@ class ImageCanvas(QLabel):
                     painter.drawPolygon(QPolygonF(points))
                 painter.drawLine(int(cx - 6), int(cy), int(cx + 6), int(cy))
                 painter.drawLine(int(cx), int(cy - 6), int(cx), int(cy + 6))
-                if self.show_diagnostics:
+                if self._auto_caliper_selected(label, layer, detection):
                     painter.setPen(QPen(QColor(255, 210, 0, 140), 1.0))
                     for window in detection.shape_params.get("caliper_windows", []):
                         length = float(window.get("length", 0.0)) * self.scale
@@ -1010,6 +1189,7 @@ class ImageCanvas(QLabel):
                             int(x + direction_x * length / 2.0),
                             int(y + direction_y * length / 2.0),
                         )
+                if self.show_diagnostics:
                     painter.setPen(QPen(QColor("#34C759"), 1.0))
                     for px, py in detection.edge_points:
                         x, y = self.image_to_widget(px, py)
@@ -1027,6 +1207,13 @@ class ImageCanvas(QLabel):
                     int(label_y - 5),
                     f"{label}{suffix}",
                 )
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key_Escape and self.selected_caliper_feature is not None:
+            self.clear_caliper_selection()
+            event.accept()
+            return
+        super().keyPressEvent(event)
 
     def wheelEvent(self, event):
         if self.image is None:
@@ -1072,6 +1259,12 @@ class ImageCanvas(QLabel):
             return
         if event.button() == Qt.LeftButton:
             if self.show_auto_detections:
+                hit = self._nearest_auto_caliper_hit(event.position().toPoint())
+                if hit is not None:
+                    label, layer, detection = hit
+                    self._select_caliper_detection("auto", label, layer, detection)
+                elif self.selected_caliper_feature is not None:
+                    self.clear_caliper_selection()
                 event.accept()
                 return
             if self.circle_pick_mode:
@@ -1084,6 +1277,22 @@ class ImageCanvas(QLabel):
                             self.roiChanged.emit(self.active_mark_id, self.active_layer, roi)
                         self.set_circle_pick_mode(False)
                     self.update()
+                event.accept()
+                return
+            manual_hit = self._manual_caliper_hit(event.position().toPoint())
+            current_detection = self.detections.get(self.active_mark_id, {}).get(self.active_layer)
+            manual_selected = self._manual_caliper_selected(
+                self.active_mark_id,
+                self.active_layer,
+                current_detection,
+            )
+            if manual_hit is not None and not manual_selected:
+                mark_id, layer, detection = manual_hit
+                self._select_caliper_detection("manual", mark_id, layer, detection)
+                event.accept()
+                return
+            if manual_selected and not self._point_in_active_roi_outer(event.position().toPoint()):
+                self.clear_caliper_selection()
                 event.accept()
                 return
             hit_part = self._roi_hit_part(event.position().toPoint())
