@@ -86,6 +86,7 @@ from .ui_components import (
 )
 from .ui_recipe_views import RecipeLibraryDialog, RecipeQuickMenu
 from .ui_workers import MeasurementWorker
+from .ui_frameless import FramelessWindowMixin
 from .ui_builders import MainWindowBuilderMixin
 from .ui_state import MainWindowStateMixin
 from .ui_workflows import MainWindowWorkflowMixin
@@ -121,6 +122,7 @@ def application_icon_path() -> Path:
 
 
 class MainWindow(
+    FramelessWindowMixin,
     QMainWindow,
     MainWindowBuilderMixin,
     MainWindowStateMixin,
@@ -133,7 +135,7 @@ class MainWindow(
             if font_path.exists() and QFontDatabase.addApplicationFont(str(font_path)) >= 0:
                 break
         self.setFont(QFont("Microsoft YaHei UI", 9))
-        self.setWindowTitle("对位偏差测量软件 V1.8.2")
+        self.setWindowTitle("对位偏差测量软件 V1.8.3")
         icon_path = application_icon_path()
         if icon_path.exists():
             self.setWindowIcon(QIcon(str(icon_path)))

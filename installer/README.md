@@ -1,6 +1,6 @@
 # Windows 安装与升级
 
-V1.8.2 使用两层打包：
+V1.8.3 使用两层打包：
 
 1. PyInstaller `onedir` 构建 `dist/OverlayMeasure/`。
 2. Inno Setup 将整个运行目录封装成一个 `OverlayMeasure_Setup_Vx.y.z.exe`。

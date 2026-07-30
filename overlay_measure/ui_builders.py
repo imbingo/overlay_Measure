@@ -162,7 +162,7 @@ class MainWindowBuilderMixin:
             self.title_label = QLabel("对位偏差测量软件")
             self.title_label.setObjectName("titleLabel")
             self.title_label.setMinimumWidth(142)
-            self.version_label = QLabel("V1.8.2")
+            self.version_label = QLabel("V1.8.3")
             self.version_label.setObjectName("versionLabel")
             self.operation_mode_combo = QComboBox()
             self.operation_mode_combo.setObjectName("accessMode")
