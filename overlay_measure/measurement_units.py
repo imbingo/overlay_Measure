@@ -114,12 +114,31 @@ def rotated_rect_size_um(
     return width_um, height_um
 
 
+def ellipse_metrics_um(shape_params: dict, config: MeasurementConfig) -> dict[str, float]:
+    """Return calibrated ellipse axes and derived metrology values.
+
+    OpenCV reports full axis lengths in pixel coordinates.  With anisotropic
+    pixels each axis must be calibrated along its own fitted direction before
+    the physical major/minor ordering is applied.
+    """
+    if "major_px" not in shape_params or "minor_px" not in shape_params:
+        return {}
+    angle_deg = float(shape_params.get("angle_deg", 0.0))
+    first_axis_um = float(shape_params["major_px"]) * axis_scale_um_per_px(config, angle_deg)
+    second_axis_um = float(shape_params["minor_px"]) * axis_scale_um_per_px(config, angle_deg + 90.0)
+    major_um = max(first_axis_um, second_axis_um)
+    minor_um = min(first_axis_um, second_axis_um)
+    return {
+        "ellipse_major_um": major_um,
+        "ellipse_minor_um": minor_um,
+        "ellipse_diameter_um": 0.5 * (major_um + minor_um),
+        "ellipse_roundness_um": 0.5 * (major_um - minor_um),
+    }
+
+
 def equivalent_size_um_from_shape(shape_params: dict, diameter_px: float, config: MeasurementConfig) -> float:
     if "major_px" in shape_params and "minor_px" in shape_params:
-        angle = float(shape_params.get("angle_deg", 0.0))
-        major_um = float(shape_params["major_px"]) * axis_scale_um_per_px(config, angle)
-        minor_um = float(shape_params["minor_px"]) * axis_scale_um_per_px(config, angle + 90.0)
-        return 0.5 * (major_um + minor_um)
+        return ellipse_metrics_um(shape_params, config)["ellipse_diameter_um"]
     if "width_px" in shape_params and "height_px" in shape_params:
         width_um, height_um = rotated_rect_size_um(
             float(shape_params["width_px"]),

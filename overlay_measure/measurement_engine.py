@@ -5,7 +5,9 @@ from typing import Callable, Dict, Iterable, Optional
 import numpy as np
 
 from .auto_mark_detector import detect_auto_marks_with_report
+from .batch_results import compact_detection_map
 from .batch_pairing import validate_batch_pairing
+from .candidate_ordering import assign_spatial_candidate_ids, resolve_preferred_candidate
 from .measurement_service import attach_algorithm_path, detect_manual_roi
 from .models import DetectionParams, DetectionResult, ImageData, MarkRecipe, MeasurementConfig, OverlayResult
 from .overlay_calculator import calculate_relative_overlay
@@ -16,16 +18,6 @@ from .traceability import create_measurement_archive
 
 ProgressCallback = Callable[[int, int, str], None]
 CancelCallback = Callable[[], bool]
-
-
-def _alpha_label(index: int) -> str:
-    chars = []
-    value = int(index)
-    while True:
-        chars.append(chr(ord("a") + value % 26))
-        value = value // 26 - 1
-        if value < 0:
-            return "".join(reversed(chars))
 
 
 def _matches_auto_rule(detection: DetectionResult, role: str, mark: MarkRecipe) -> bool:
@@ -54,8 +46,8 @@ def _choose_auto_selection(
             references.append(label)
         if _matches_auto_rule(detection, "target", mark):
             targets.append(label)
-    reference = preferred.get("reference_label", "")
-    target = preferred.get("target_label", "")
+    reference = resolve_preferred_candidate(preferred.get("reference_label", ""), detections)
+    target = resolve_preferred_candidate(preferred.get("target_label", ""), detections)
     if reference not in references:
         reference = references[0] if references else ""
     if target not in targets or target == reference:
@@ -103,10 +95,10 @@ def detect_auto_set(
     detected: Dict[str, Dict[str, DetectionResult]] = {}
     image_map = dict(image_pairs)
     candidate_count = max(1, len(results_all))
-    for label_index, result in enumerate(results_all):
+    spatial_entries = assign_spatial_candidate_ids(results_all, config.mode == "Dual Image")
+    for label_index, (label, result) in enumerate(spatial_entries):
         if cancelled and cancelled():
             raise InterruptedError("用户取消计算")
-        label = _alpha_label(label_index)
         result.mark_id = f"{mark_id}-{label}"
         candidates[label] = {result.layer: result}
         if progress:
@@ -126,6 +118,10 @@ def detect_auto_set(
         attach_algorithm_path(measured, "Auto")
         detected[label] = {result.layer: measured}
 
+    for role_key, role_name in (("reference_label", "基准"), ("target_label", "待测")):
+        legacy_value = str((preferred_selection or {}).get(role_key, "")).strip()
+        if legacy_value and not resolve_preferred_candidate(legacy_value, detected):
+            warnings.append(f"{mark_id}：旧配方{role_name}候选 {legacy_value} 无法映射，已按当前形状和尺寸规则回退")
     reference_label, target_label = _choose_auto_selection(detected, mark, preferred_selection)
     overlay = None
     if reference_label and target_label:
@@ -278,6 +274,10 @@ def run_measurement_job(job: dict, progress: ProgressCallback, cancelled: Cancel
                 "lower_file": lower.path if lower else "",
                 "overlay": None,
                 "error": "",
+                "workflow": "Auto" if is_auto else "Manual",
+                "detections": {},
+                "candidates": {},
+                "selection": {},
             }
             try:
                 stage = lambda percent, message: progress(
@@ -295,11 +295,16 @@ def run_measurement_job(job: dict, progress: ProgressCallback, cancelled: Cancel
                     payload["selections"][mark_id] = measured["selection"]
                     payload["warnings"].extend(measured["warnings"])
                     overlay = measured["overlay"]
+                    record["detections"] = compact_detection_map(measured["detections"])
+                    record["candidates"] = compact_detection_map(measured["candidates"])
+                    record["selection"] = dict(measured["selection"])
                 else:
                     measured = _manual_overlay(mark_id, marks[mark_id], images, params, config, selections.get(mark_id), stage, cancelled)
                     payload["detections"][mark_id] = measured["detections"]
                     payload["selections"][mark_id] = measured["selection"]
                     overlay = measured["overlay"]
+                    record["detections"] = compact_detection_map(measured["detections"])
+                    record["selection"] = dict(measured["selection"])
                 if overlay is None:
                     raise ValueError("未选择到两个有效轮廓，未生成对位结果")
                 record["overlay"] = overlay

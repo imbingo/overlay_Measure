@@ -24,12 +24,14 @@ def test_main_window_algorithm_path_status_button_smoke(monkeypatch):
     window.show()
     app.processEvents()
 
-    assert "V1.8.3" in window.windowTitle()
+    assert "V1.9.0" in window.windowTitle()
     assert not window.windowIcon().isNull()
     assert window.windowFlags() & Qt.FramelessWindowHint
     assert window.title_bar.height() == 46
     assert window.command_bar.objectName() == "commandBar"
-    assert window.version_label.text() == "V1.8.3"
+    assert window.version_label.text() == "V1.9.0"
+    assert window.batch_detail_combo.count() == 0
+    assert window.batch_detail_bar.isHidden()
     assert window.operation_mode == "Production"
     assert window.operation_mode_combo.currentData() == "Production"
     assert window.quality_profile_combo.currentData() == "Standard"

@@ -253,6 +253,10 @@ class DetectionResult:
     edge_gradients: List[float] = field(default_factory=list)
     rejected_gradients: List[float] = field(default_factory=list)
     shape_params: Dict[str, object] = field(default_factory=dict)
+    ellipse_major_um: Optional[float] = None
+    ellipse_minor_um: Optional[float] = None
+    ellipse_diameter_um: Optional[float] = None
+    ellipse_roundness_um: Optional[float] = None
 
 
 @dataclass

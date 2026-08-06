@@ -51,6 +51,7 @@ from PySide6.QtWidgets import (
 from .auto_mark_detector import detect_auto_marks_with_report
 from .access_control import AccessController
 from .batch_pairing import validate_batch_pairing
+from .candidate_ordering import assign_spatial_candidate_ids, candidate_display_label, resolve_preferred_candidate
 from .export_naming import build_export_filename
 from .image_loader import SUPPORTED_EXTENSIONS, display_to_uint8, load_image
 from .measurement_engine import run_measurement_job
@@ -69,7 +70,7 @@ from .quality_profiles import (
 from .recipe_manager import load_recipe, save_recipe
 from .recipe_library import RecipeLibrary, RecipeLibraryEntry
 from .recipe_integrity import seal_recipe, verify_recipe
-from .result_exporter import build_detection_rows, export_results
+from .result_exporter import build_detection_failure_row, build_detection_rows, export_results
 from .rz_calculator import build_summary_rows
 from .runtime_support import RecoveryStore, build_runtime_logger
 
@@ -110,6 +111,7 @@ class MainWindowWorkflowMixin:
                 for mark_id, detected in self.auto_detections_by_mark.items():
                     for label, layer_map in detected.items():
                         for layer_key, detection in layer_map.items():
+                            display_label = candidate_display_label(label, detection)
                             image = self._image_for_layer(layer_key, mark_id)
                             radius = max(6.0, float(detection.shape_params.get("radius_px", detection.diameter_px / 2.0)))
                             roi = Roi(
@@ -118,10 +120,10 @@ class MainWindowWorkflowMixin:
                                 radius * 2.0,
                                 radius * 2.0,
                             )
-                            out_path = Path(tmp_dir) / f"auto_{mark_id}_{label}_{layer_key}.png"
+                            out_path = Path(tmp_dir) / f"auto_{mark_id}_{display_label}_{layer_key}.png"
                             if self._crop_roi_image(image, roi, out_path):
                                 items.append({
-                                    "mark_id": f"{mark_id}-{label}",
+                                    "mark_id": f"{mark_id}-{display_label}",
                                     "layer": LAYER_LABELS.get(layer_key, layer_key),
                                     "path": str(out_path),
                                     "note": "自动识别轮廓截图",
@@ -312,7 +314,7 @@ class MainWindowWorkflowMixin:
         def _refresh_auto_selection_combos(self):
             """Refresh reference/target contour selectors for both Auto and Manual workflows.
 
-            Auto workflow uses contours detected by auto_mark_detector and labeled a/b/c/d.
+            Auto workflow uses contours detected by auto_mark_detector and displays row-major spatial numbers.
             Manual workflow uses the currently analyzed manual ROI results, so users can
             explicitly choose which ROI is the reference contour and which is the target contour.
             """
@@ -320,7 +322,12 @@ class MainWindowWorkflowMixin:
                 return
             mark_id = self._current_mark_id()
             self._ensure_mark_runtime(mark_id)
-            selection = self.auto_selections[mark_id]
+            batch_record = self._selected_batch_record(mark_id) if hasattr(self, "_selected_batch_record") else None
+            selection = (
+                batch_record.get("selection", {})
+                if batch_record
+                else self.auto_selections[mark_id]
+            )
             previous_reference = selection.get("reference_label", "")
             previous_target = selection.get("target_label", "")
             self.auto_reference_combo.blockSignals(True)
@@ -330,19 +337,23 @@ class MainWindowWorkflowMixin:
 
             if self._is_auto_workflow():
                 mark = self.marks[mark_id]
-                for label, layer_map in self.auto_detections_by_mark[mark_id].items():
+                current_detections = self._current_auto_detections()
+                previous_reference = resolve_preferred_candidate(previous_reference, current_detections)
+                previous_target = resolve_preferred_candidate(previous_target, current_detections)
+                for label, layer_map in current_detections.items():
                     detection = next(iter(layer_map.values()))
                     if detection.shape_params.get("quality_status") != "Valid":
                         continue
                     shape = "方" if detection.fitting_mode == "ProductionRectangle" else "圆"
                     size_name = "半尺寸" if detection.fitting_mode in {"AutoRectangle", "ProductionRectangle"} else "半径"
-                    text = f"{mark_id}-{label} - {shape} - {size_name}={detection.diameter_um / 2.0:.3f} μm"
+                    display_label = candidate_display_label(label, detection)
+                    text = f"{mark_id}-{display_label} - {shape} - {size_name}={detection.diameter_um / 2.0:.3f} μm"
                     if self._matches_auto_rule(detection, "reference", mark):
                         self.auto_reference_combo.addItem(text, label)
                     if self._matches_auto_rule(detection, "target", mark):
                         self.auto_target_combo.addItem(text, label)
             else:
-                layer_map = self.detections.get(mark_id, {})
+                layer_map = self._current_manual_detection_map().get(mark_id, {})
                 for layer in ("upper", "lower"):
                     detection = layer_map.get(layer)
                     if detection is None:
@@ -398,6 +409,7 @@ class MainWindowWorkflowMixin:
 
             detected = {}
             candidates = {}
+            previous_selection = dict(self.auto_selections.get(mark_id, {}))
             try:
                 results_all = []
                 report_warnings = []
@@ -424,8 +436,8 @@ class MainWindowWorkflowMixin:
                 # Avoid UI stalls on noisy images by refining only the largest/relevant candidates.
                 max_candidates = 32
                 results_all = results_all[:max_candidates]
-                for label_index, result in enumerate(results_all):
-                    label = self._alpha_label(label_index)
+                spatial_entries = assign_spatial_candidate_ids(results_all, self._current_mode() == "Dual Image")
+                for label_index, (label, result) in enumerate(spatial_entries):
                     result.mark_id = f"{mark_id}-{label}"
                     candidates[label] = {result.layer: result}
                     image = self._image_for_layer(result.layer, mark_id)
@@ -448,7 +460,7 @@ class MainWindowWorkflowMixin:
                 self.auto_candidates_by_mark[mark_id] = candidates
                 self.auto_detections_by_mark[mark_id] = detected
                 self.auto_overlays.pop(mark_id, None)
-                self.auto_selections[mark_id] = {"reference_label": "", "target_label": ""}
+                self.auto_selections[mark_id] = previous_selection
                 self._refresh_auto_selection_combos()
                 self._refresh_all_widgets()
                 if report_warnings:
@@ -480,7 +492,7 @@ class MainWindowWorkflowMixin:
 
         def _find_manual_detection(self, mark_id: str, label: str) -> Optional[DetectionResult]:
             if label in {"upper", "lower"}:
-                return self.detections.get(mark_id, {}).get(label)
+                return self._current_manual_detection_map().get(mark_id, {}).get(label)
             return None
 
         def calculate_auto_overlay(self, show_message: bool = True):
@@ -521,7 +533,12 @@ class MainWindowWorkflowMixin:
                     QMessageBox.warning(self, "计算对位偏差", "所选轮廓未通过质量门槛，不能用于对位判定。")
                 return None
 
-            name = f"{mark_id}: {target_label} 相对 {reference_label}"
+            if self._is_auto_workflow():
+                reference_name = candidate_display_label(reference_label, reference)
+                target_name = candidate_display_label(target_label, target)
+            else:
+                reference_name, target_name = reference_label, target_label
+            name = f"{mark_id}: {target_name} 相对 {reference_name}"
             overlay = calculate_relative_overlay(mark_id, reference, target, self.config)
             if self.config.recipe_validation_status != "Validated":
                 overlay.result = "Trial"
@@ -652,6 +669,9 @@ class MainWindowWorkflowMixin:
             self.batch_images = {"Mark1": {"upper": [], "lower": []}, "Mark2": {"upper": [], "lower": []}}
             self.batch_overlays = {"Mark1": [], "Mark2": []}
             self.batch_run_records = {"Mark1": [], "Mark2": []}
+            self._batch_detail_run_index = 1
+            self._batch_detail_last_single_index = 1
+            self._refresh_batch_detail_selector()
             for mark_id in ("Mark1", "Mark2"):
                 for layer in ("upper", "lower"):
                     if self._image_source(mark_id, layer) == "batch_preview":
@@ -857,6 +877,8 @@ class MainWindowWorkflowMixin:
             self.batch_images = {"Mark1": {"upper": [], "lower": []}, "Mark2": {"upper": [], "lower": []}}
             self.batch_overlays = {"Mark1": [], "Mark2": []}
             self.batch_run_records = {"Mark1": [], "Mark2": []}
+            self._batch_detail_run_index = 1
+            self._batch_detail_last_single_index = 1
             self.roi_sources = self._empty_roi_sources()
             self.loaded_recipe_path = ""
             self.loaded_recipe_display_name = ""
@@ -1354,6 +1376,8 @@ class MainWindowWorkflowMixin:
             self.auto_selections = payload.get("selections", self.auto_selections)
             self.batch_overlays = payload.get("batch_overlays", {"Mark1": [], "Mark2": []})
             self.batch_run_records = payload.get("batch_records", {"Mark1": [], "Mark2": []})
+            self._refresh_batch_detail_selector(default_first=bool(payload.get("batch")))
+            self._sync_current_mark_images()
             self._refresh_auto_selection_combos()
             self._refresh_all_widgets()
             try:
@@ -1370,7 +1394,7 @@ class MainWindowWorkflowMixin:
                 )
             self.recovery_store.clear()
             if payload.get("batch") and hasattr(self, "result_tabs"):
-                self.result_tabs.setCurrentIndex(2)
+                self.result_tabs.setCurrentIndex(0)
             result_map = self.auto_overlays if self._is_auto_workflow() else self.overlays
             lines = [
                 f"{mark_id}: Dx={item.delta_x_um:+.3f} μm，Dy={item.delta_y_um:+.3f} μm，"
@@ -1434,7 +1458,8 @@ class MainWindowWorkflowMixin:
 
         def export_result_file(self):
             display_detections = self._display_detections()
-            if not display_detections:
+            has_batch_details = self._is_batch_mode() and any(self.batch_run_records.values())
+            if not display_detections and not has_batch_details:
                 QMessageBox.warning(self, "无结果", "当前没有可导出的分析结果。")
                 return
             self._pull_config_from_ui()
@@ -1448,7 +1473,57 @@ class MainWindowWorkflowMixin:
                 return
             try:
                 rows = []
-                if self._is_auto_workflow():
+                if has_batch_details:
+                    reference_names = []
+                    target_names = []
+                    for mark_id in ("Mark1", "Mark2"):
+                        for record in self.batch_run_records.get(mark_id, []):
+                            detected = record.get("detections", {})
+                            selection = record.get("selection", {})
+                            overlay = record.get("overlay")
+                            if record.get("workflow") == "Auto":
+                                reference = selection.get("reference_label", "")
+                                target = selection.get("target_label", "")
+                                if reference:
+                                    reference_detection = next(iter(detected.get(reference, {}).values()), None)
+                                    reference_names.append(f"{mark_id}-{candidate_display_label(reference, reference_detection)}")
+                                if target:
+                                    target_detection = next(iter(detected.get(target, {}).values()), None)
+                                    target_names.append(f"{mark_id}-{candidate_display_label(target, target_detection)}")
+                                named = {}
+                                for label, layer_map in detected.items():
+                                    detection = next(iter(layer_map.values()), None)
+                                    named[f"{mark_id}-{candidate_display_label(label, detection)}"] = layer_map
+                                overlay_key = ""
+                                if target in detected:
+                                    target_detection = next(iter(detected[target].values()), None)
+                                    overlay_key = f"{mark_id}-{candidate_display_label(target, target_detection)}"
+                                row_overlays = {overlay_key: overlay} if overlay_key and overlay else {}
+                            else:
+                                named = {mark_id: detected} if detected else {}
+                                row_overlays = {mark_id: overlay} if overlay else {}
+                            if named:
+                                rows.extend(build_detection_rows(
+                                    named,
+                                    row_overlays,
+                                    self.config,
+                                    upper_file=record.get("upper_file", ""),
+                                    lower_file=record.get("lower_file", ""),
+                                    run_index=int(record.get("run_index", 0) or 0),
+                                ))
+                            else:
+                                rows.append(build_detection_failure_row(
+                                    self.config,
+                                    int(record.get("run_index", 0) or 0),
+                                    mark_id,
+                                    record.get("upper_file", ""),
+                                    record.get("lower_file", ""),
+                                    record.get("error", "未生成识别结果"),
+                                ))
+                    if self._is_auto_workflow():
+                        self.config.auto_reference_label = "；".join(reference_names)
+                        self.config.auto_target_label = "；".join(target_names)
+                elif self._is_auto_workflow():
                     reference_names = []
                     target_names = []
                     for mark_id, detected in self.auto_detections_by_mark.items():
@@ -1456,13 +1531,19 @@ class MainWindowWorkflowMixin:
                         reference = selection.get("reference_label", "")
                         target = selection.get("target_label", "")
                         if reference:
-                            reference_names.append(f"{mark_id}-{reference}")
+                            reference_detection = next(iter(detected.get(reference, {}).values()), None)
+                            reference_names.append(f"{mark_id}-{candidate_display_label(reference, reference_detection)}")
                         if target:
-                            target_names.append(f"{mark_id}-{target}")
-                        named = {f"{mark_id}-{label}": layer_map for label, layer_map in detected.items()}
+                            target_detection = next(iter(detected.get(target, {}).values()), None)
+                            target_names.append(f"{mark_id}-{candidate_display_label(target, target_detection)}")
+                        named = {
+                            f"{mark_id}-{candidate_display_label(label, next(iter(layer_map.values()), None))}": layer_map
+                            for label, layer_map in detected.items()
+                        }
                         row_overlays = {}
                         if target and mark_id in self.auto_overlays:
-                            row_overlays[f"{mark_id}-{target}"] = self.auto_overlays[mark_id]
+                            target_detection = next(iter(detected.get(target, {}).values()), None)
+                            row_overlays[f"{mark_id}-{candidate_display_label(target, target_detection)}"] = self.auto_overlays[mark_id]
                         upper = self._image_for_layer("upper", mark_id)
                         lower = self._image_for_layer("lower", mark_id) if self._current_mode() == "Dual Image" else None
                         rows.extend(build_detection_rows(

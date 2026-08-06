@@ -10,13 +10,14 @@ from openpyxl.drawing.image import Image as XlsxImage
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 
-from .measurement_units import axis_scale_um_per_px, mean_pixel_size_um, rotated_rect_size_um, scalar_px_to_um
+from .measurement_units import ellipse_metrics_um, mean_pixel_size_um, rotated_rect_size_um, scalar_px_to_um
 from .models import DetectionResult, MeasurementConfig, OverlayResult
 from .quality_profiles import quality_profile_display
 
 
 DETAIL_COLUMNS = {
     "timestamp": "测量时间",
+    "run_index": "测量次数",
     "measurement_mode": "测量模式",
     "upper_file": "上层/单图文件",
     "lower_file": "下层文件",
@@ -57,6 +58,8 @@ DETAIL_COLUMNS = {
     "shape_height_um": "高度(μm)",
     "shape_major_um": "长轴(μm)",
     "shape_minor_um": "短轴(μm)",
+    "ellipse_diameter_um": "椭圆直径(μm)",
+    "ellipse_roundness_um": "椭圆圆度(μm)",
     "shape_angle_deg": "角度(°)",
     "shape_aspect_ratio": "宽高比",
     "roi_type": "ROI类型",
@@ -140,6 +143,7 @@ def build_detection_rows(
     config: MeasurementConfig,
     upper_file: str = "",
     lower_file: str = "",
+    run_index: Optional[int] = None,
 ) -> List[dict]:
     rows = []
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -155,8 +159,10 @@ def build_detection_rows(
                 width_um, height_um = rotated_rect_size_um(float(width_px), float(height_px), angle_deg, config)
             major_px = det.shape_params.get("major_px")
             minor_px = det.shape_params.get("minor_px")
+            ellipse_metrics = ellipse_metrics_um(det.shape_params, config) if det.fitting_mode == "Ellipse" else {}
             row = {
                 "timestamp": now,
+                "run_index": run_index,
                 "measurement_mode": _mode_cn(config.mode),
                 "upper_file": upper_file,
                 "lower_file": lower_file,
@@ -198,8 +204,10 @@ def build_detection_rows(
                 "detection_warning": det.warning,
                 "shape_width_um": width_um,
                 "shape_height_um": height_um,
-                "shape_major_um": major_px * axis_scale_um_per_px(config, angle_deg) if major_px is not None else None,
-                "shape_minor_um": minor_px * axis_scale_um_per_px(config, angle_deg + 90.0) if minor_px is not None else None,
+                "shape_major_um": det.ellipse_major_um if det.ellipse_major_um is not None else ellipse_metrics.get("ellipse_major_um"),
+                "shape_minor_um": det.ellipse_minor_um if det.ellipse_minor_um is not None else ellipse_metrics.get("ellipse_minor_um"),
+                "ellipse_diameter_um": det.ellipse_diameter_um if det.ellipse_diameter_um is not None else ellipse_metrics.get("ellipse_diameter_um"),
+                "ellipse_roundness_um": det.ellipse_roundness_um if det.ellipse_roundness_um is not None else ellipse_metrics.get("ellipse_roundness_um"),
                 "shape_angle_deg": det.shape_params.get("angle_deg"),
                 "shape_aspect_ratio": det.shape_params.get("aspect_ratio"),
                 "roi_type": _roi_cn(det.shape_params.get("roi_type")),
@@ -219,6 +227,28 @@ def build_detection_rows(
             }
             rows.append(row)
     return rows
+
+
+def build_detection_failure_row(
+    config: MeasurementConfig,
+    run_index: int,
+    mark_id: str,
+    upper_file: str,
+    lower_file: str,
+    error: str,
+) -> dict:
+    return {
+        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "run_index": run_index,
+        "measurement_mode": _mode_cn(config.mode),
+        "upper_file": upper_file,
+        "lower_file": lower_file,
+        "mark_id": mark_id,
+        "quality_status": "异常",
+        "failure_reason": error,
+        "detection_warning": error,
+        "result": "异常",
+    }
 
 
 def _autosize(ws):
@@ -311,6 +341,8 @@ def export_results(
             {"项目": "Ry角度(μrad)", "内容": getattr(config, "ry_angle_urad", 0.0)},
             {"项目": "物料厚度(mm)", "内容": getattr(config, "material_thickness_mm", 0.0)},
             {"项目": "角度补偿公式", "内容": "ΔX=原始ΔX+厚度×Ry/1000；ΔY=原始ΔY-厚度×Rx/1000"},
+            {"项目": "椭圆直径定义", "内容": "(物理长轴+物理短轴)/2"},
+            {"项目": "椭圆圆度定义", "内容": "(物理长轴-物理短轴)/2；非 ISO 最小区域圆度"},
             {"项目": "Rz分布方向", "内容": config.rz_layout},
             {"项目": "Rz单位", "内容": "μrad"},
             {"项目": "Mark间距L(μm)", "内容": config.rz_distance_l_um},

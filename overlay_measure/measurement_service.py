@@ -9,6 +9,7 @@ from .caliper_circle_detector import detect_caliper_circle
 from .circle_ellipse_fitter import FitResult, fit_mark_shape
 from .models import DetectionParams, DetectionResult, ImageData, MeasurementConfig, Roi
 from .measurement_units import (
+    ellipse_metrics_um,
     equivalent_size_um_from_shape,
     points_to_um_distances,
     radial_diameter_statistics_um,
@@ -97,6 +98,7 @@ def _fit_to_detection(
         "roi_angle_deg": float(getattr(roi, "angle_deg", 0.0)),
         "use_ransac": bool(use_ransac),
     }
+    ellipse_metrics = {}
     if "radius_px" in fit.shape_params or fit.mode in {"Circle", "EdgeCenter"}:
         diameter_um, residual_um = radial_diameter_residual_um(
             used_points,
@@ -116,6 +118,9 @@ def _fit_to_detection(
                 )
             )
     else:
+        if fit.mode == "Ellipse":
+            ellipse_metrics = ellipse_metrics_um(shape_params, config)
+            shape_params.update(ellipse_metrics)
         diameter_um = equivalent_size_um_from_shape(shape_params, fit.diameter_px, config)
         residual_um = scalar_px_to_um(fit.residual_px, config)
 
@@ -136,6 +141,10 @@ def _fit_to_detection(
         warning=fit.warning or warning,
         edge_points=_point_list(used_points),
         shape_params=shape_params,
+        ellipse_major_um=ellipse_metrics.get("ellipse_major_um"),
+        ellipse_minor_um=ellipse_metrics.get("ellipse_minor_um"),
+        ellipse_diameter_um=ellipse_metrics.get("ellipse_diameter_um"),
+        ellipse_roundness_um=ellipse_metrics.get("ellipse_roundness_um"),
     )
     annotate_detection_quality(detection, config)
     return attach_algorithm_path(detection, "Manual")

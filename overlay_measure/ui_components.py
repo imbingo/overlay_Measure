@@ -51,6 +51,7 @@ from PySide6.QtWidgets import (
 from .auto_mark_detector import detect_auto_marks_with_report
 from .access_control import AccessController
 from .batch_pairing import validate_batch_pairing
+from .candidate_ordering import candidate_display_label
 from .export_naming import build_export_filename
 from .image_loader import SUPPORTED_EXTENSIONS, display_to_uint8, load_image
 from .measurement_engine import run_measurement_job
@@ -1205,7 +1206,7 @@ class ImageCanvas(QLabel):
                 painter.drawText(
                     int(label_x + 5),
                     int(label_y - 5),
-                    f"{label}{suffix}",
+                    f"{candidate_display_label(label, detection)}{suffix}",
                 )
 
     def keyPressEvent(self, event):

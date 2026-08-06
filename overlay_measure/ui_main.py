@@ -135,7 +135,7 @@ class MainWindow(
             if font_path.exists() and QFontDatabase.addApplicationFont(str(font_path)) >= 0:
                 break
         self.setFont(QFont("Microsoft YaHei UI", 9))
-        self.setWindowTitle("对位偏差测量软件 V1.8.3")
+        self.setWindowTitle("对位偏差测量软件 V1.9.0")
         icon_path = application_icon_path()
         if icon_path.exists():
             self.setWindowIcon(QIcon(str(icon_path)))
@@ -176,6 +176,8 @@ class MainWindow(
         }
         self.batch_overlays: Dict[str, list[OverlayResult]] = {"Mark1": [], "Mark2": []}
         self.batch_run_records: Dict[str, list[dict]] = {"Mark1": [], "Mark2": []}
+        self._batch_detail_run_index = 1
+        self._batch_detail_last_single_index = 1
         self.roi_sources = self._empty_roi_sources()
         self.loaded_recipe_path = ""
         self.loaded_recipe_display_name = ""

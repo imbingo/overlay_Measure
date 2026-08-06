@@ -51,11 +51,12 @@ from PySide6.QtWidgets import (
 from .auto_mark_detector import detect_auto_marks_with_report
 from .access_control import AccessController
 from .batch_pairing import validate_batch_pairing
+from .candidate_ordering import candidate_display_label
 from .export_naming import build_export_filename
 from .image_loader import SUPPORTED_EXTENSIONS, display_to_uint8, load_image
 from .measurement_engine import run_measurement_job
 from .measurement_service import attach_algorithm_path, describe_algorithm_path, detect_manual_roi
-from .measurement_units import axis_scale_um_per_px, rotated_rect_size_um
+from .measurement_units import ellipse_metrics_um, rotated_rect_size_um
 from .models import DetectionParams, DetectionResult, ImageData, MarkRecipe, MeasurementConfig, OverlayResult, Roi
 from .overlay_calculator import calculate_overlay, calculate_relative_overlay
 from .production_measurement import refine_candidate
@@ -383,6 +384,11 @@ class MainWindowStateMixin:
 
         def _active_image_for_layer(self, mark_id: str, layer: str) -> Optional[ImageData]:
             self._ensure_mark_runtime(mark_id)
+            if self._is_batch_mode():
+                images = self.batch_images.get(mark_id, {}).get(layer, [])
+                if images:
+                    index = max(0, min(len(images) - 1, self._batch_detail_last_single_index - 1))
+                    return images[index]
             image = self.mark_images[mark_id][layer]
             if image is None:
                 return None
@@ -404,11 +410,84 @@ class MainWindowStateMixin:
                 self._set_combo_value(self.measurement_run_mode_combo, "Single")
             self.batch_overlays = {"Mark1": [], "Mark2": []}
             self.batch_run_records = {"Mark1": [], "Mark2": []}
+            self._batch_detail_run_index = 1
+            self._batch_detail_last_single_index = 1
+            self._refresh_batch_detail_selector()
 
         def _current_auto_detections(self):
             mark_id = self._current_mark_id()
             self._ensure_mark_runtime(mark_id)
+            record = self._selected_batch_record(mark_id)
+            if record and record.get("workflow") == "Auto":
+                return record.get("detections", {})
             return self.auto_detections_by_mark[mark_id]
+
+        def _selected_batch_record(self, mark_id: str, use_preview: bool = True) -> Optional[dict]:
+            if not self._is_batch_mode():
+                return None
+            records = self.batch_run_records.get(mark_id, [])
+            if not records:
+                return None
+            index = self._batch_detail_last_single_index if use_preview else self._batch_detail_run_index
+            if isinstance(index, int) and 1 <= index <= len(records):
+                return records[index - 1]
+            return None
+
+        def _current_manual_detection_map(self) -> dict:
+            if not self._is_batch_mode() or not any(self.batch_run_records.values()):
+                return self.detections
+            result = {}
+            for mark_id in ("Mark1", "Mark2"):
+                record = self._selected_batch_record(mark_id)
+                if record and record.get("workflow") == "Manual" and record.get("detections"):
+                    result[mark_id] = record["detections"]
+            return result
+
+        def _refresh_batch_detail_selector(self, default_first: bool = False):
+            if not hasattr(self, "batch_detail_combo"):
+                return
+            maximum = max((len(records) for records in self.batch_run_records.values()), default=0)
+            visible = self._is_batch_mode() and maximum > 0
+            self.batch_detail_bar.setVisible(visible)
+            if not visible:
+                return
+            previous = 1 if default_first else self.batch_detail_combo.currentData()
+            self.batch_detail_combo.blockSignals(True)
+            self.batch_detail_combo.clear()
+            for index in range(1, maximum + 1):
+                self.batch_detail_combo.addItem(f"第{index}次", index)
+            self.batch_detail_combo.addItem("全部", "all")
+            target_index = self.batch_detail_combo.findData(previous)
+            self.batch_detail_combo.setCurrentIndex(target_index if target_index >= 0 else 0)
+            self.batch_detail_combo.blockSignals(False)
+            self._batch_detail_run_index = self.batch_detail_combo.currentData() or 1
+            if isinstance(self._batch_detail_run_index, int):
+                self._batch_detail_last_single_index = self._batch_detail_run_index
+            self._update_batch_preview_label()
+
+        def _update_batch_preview_label(self):
+            if not hasattr(self, "batch_detail_preview_label"):
+                return
+            if self._batch_detail_run_index == "all":
+                self.batch_detail_preview_label.setText(
+                    f"表格：全部；图像预览：第{self._batch_detail_last_single_index}次"
+                )
+            else:
+                self.batch_detail_preview_label.setText(f"图像预览：第{self._batch_detail_last_single_index}次")
+
+        def _on_batch_detail_changed(self):
+            if not hasattr(self, "batch_detail_combo"):
+                return
+            selected = self.batch_detail_combo.currentData()
+            if selected is None:
+                return
+            self._batch_detail_run_index = selected
+            if isinstance(selected, int):
+                self._batch_detail_last_single_index = selected
+            self._update_batch_preview_label()
+            self._sync_current_mark_images()
+            self._refresh_auto_selection_combos()
+            self._refresh_all_widgets()
 
         def _sync_current_mark_images(self):
             mark_id = self._current_mark_id()
@@ -658,6 +737,10 @@ class MainWindowStateMixin:
             self._refresh_all_widgets()
 
         def _refresh_all_widgets(self, *args):
+            if hasattr(self, "batch_detail_bar"):
+                self.batch_detail_bar.setVisible(
+                    self._is_batch_mode() and any(self.batch_run_records.values())
+                )
             current_mark = self.mark_combo.currentText() or "Mark1"
             current_layer = self._current_layer()
             is_dual = self._current_mode() == "Dual Image"
@@ -712,7 +795,7 @@ class MainWindowStateMixin:
                 current_mark,
                 current_layer,
                 self.marks,
-                self.detections,
+                self._current_manual_detection_map(),
                 upper_roi_type,
                 roi_inner_ratio,
                 roi_target_edge,
@@ -735,7 +818,7 @@ class MainWindowStateMixin:
                 current_mark,
                 current_layer,
                 self.marks,
-                self.detections,
+                self._current_manual_detection_map(),
                 lower_roi_type,
                 roi_inner_ratio,
                 roi_target_edge,
@@ -858,18 +941,75 @@ class MainWindowStateMixin:
 
         def _display_detections(self):
             if not self._is_auto_workflow():
-                return self.detections
+                return self._current_manual_detection_map()
             combined = {}
-            for mark_id, detected in self.auto_detections_by_mark.items():
+            source = self.auto_detections_by_mark
+            if self._is_batch_mode() and any(self.batch_run_records.values()):
+                source = {}
+                for mark_id in ("Mark1", "Mark2"):
+                    record = self._selected_batch_record(mark_id)
+                    source[mark_id] = record.get("detections", {}) if record else {}
+            for mark_id, detected in source.items():
                 for label, layer_map in detected.items():
-                    combined[f"{mark_id}-{label}"] = layer_map
+                    detection = next(iter(layer_map.values()), None)
+                    combined[f"{mark_id}-{candidate_display_label(label, detection)}"] = layer_map
             return combined
+
+        def _display_detection_entries(self) -> list[dict]:
+            if self._is_batch_mode() and any(self.batch_run_records.values()):
+                entries = []
+                show_all = self._batch_detail_run_index == "all"
+                for mark_id in ("Mark1", "Mark2"):
+                    records = self.batch_run_records.get(mark_id, [])
+                    selected_records = records if show_all else [
+                        record for record in records
+                        if record.get("run_index") == self._batch_detail_run_index
+                    ]
+                    for record in selected_records:
+                        detections = record.get("detections", {})
+                        if record.get("workflow") == "Auto":
+                            for label, layer_map in detections.items():
+                                detection = next(iter(layer_map.values()), None)
+                                display_id = f"{mark_id}-{candidate_display_label(label, detection)}"
+                                for layer, item in layer_map.items():
+                                    entries.append({
+                                        "run_index": record.get("run_index"), "mark_id": display_id,
+                                        "layer": layer, "detection": item,
+                                        "upper_file": record.get("upper_file", ""),
+                                        "lower_file": record.get("lower_file", ""), "error": record.get("error", ""),
+                                    })
+                        else:
+                            for layer, item in detections.items():
+                                entries.append({
+                                    "run_index": record.get("run_index"), "mark_id": mark_id,
+                                    "layer": layer, "detection": item,
+                                    "upper_file": record.get("upper_file", ""),
+                                    "lower_file": record.get("lower_file", ""), "error": record.get("error", ""),
+                                })
+                        if not detections:
+                            entries.append({
+                                "run_index": record.get("run_index"), "mark_id": mark_id,
+                                "layer": "", "detection": None,
+                                "upper_file": record.get("upper_file", ""),
+                                "lower_file": record.get("lower_file", ""),
+                                "error": record.get("error", "未生成识别结果"),
+                            })
+                return entries
+            entries = []
+            for mark_id, layer_map in self._display_detections().items():
+                for layer, detection in layer_map.items():
+                    entries.append({
+                        "run_index": None, "mark_id": mark_id, "layer": layer,
+                        "detection": detection, "upper_file": "", "lower_file": "", "error": "",
+                    })
+            return entries
 
         def _display_overlays(self):
             return self.auto_overlays if self._is_auto_workflow() else self.overlays
 
         def _find_auto_detection(self, mark_id: str, label: str) -> Optional[DetectionResult]:
-            layer_map = self.auto_detections_by_mark.get(mark_id, {}).get(label, {})
+            source = self._current_auto_detections() if mark_id == self._current_mark_id() else self.auto_detections_by_mark.get(mark_id, {})
+            layer_map = source.get(label, {})
             return next(iter(layer_map.values()), None)
 
         def _build_summary_rows(self):
@@ -989,9 +1129,11 @@ class MainWindowStateMixin:
                 return
             parts = [f"当前 {current_mark}"]
             if reference is not None:
-                parts.append(f"基准({reference_label})：{describe_algorithm_path(reference, workflow)}")
+                reference_name = candidate_display_label(reference_label, reference) if show_auto else reference_label
+                parts.append(f"基准({reference_name})：{describe_algorithm_path(reference, workflow)}")
             if target is not None:
-                parts.append(f"待测({target_label})：{describe_algorithm_path(target, workflow)}")
+                target_name = candidate_display_label(target_label, target) if show_auto else target_label
+                parts.append(f"待测({target_name})：{describe_algorithm_path(target, workflow)}")
             self.algorithm_path_text = "；".join(parts)
             self.algorithm_path_button.setToolTip(self.algorithm_path_text)
             if hasattr(self, "algorithm_path_summary_label"):
@@ -1003,16 +1145,27 @@ class MainWindowStateMixin:
 
         def _refresh_tables(self):
             det_headers = [
-                "标记", "层", "中心 X (μm)", "中心 Y (μm)",
-                "尺寸/直径 (μm)", "参考残差 (μm)", "边缘点数", "置信度", "算法",
+                "次数", "输入文件", "标记", "层", "中心 X (μm)", "中心 Y (μm)",
+                "尺寸/直径 (μm)", "椭圆圆度 (μm)", "参考残差 (μm)", "边缘点数", "置信度", "算法",
                 "质量状态", "质量门槛", "实际质量", "质量详情", "覆盖率",
                 "形状参数", "算法路径", "提示",
             ]
             det_rows = []
-            display_detections = self._display_detections()
             manual_labels = self._manual_detection_labels()
-            for mark_id, layer_map in display_detections.items():
-                for layer, d in layer_map.items():
+            for entry in self._display_detection_entries():
+                    mark_id = entry["mark_id"]
+                    layer = entry["layer"]
+                    d = entry["detection"]
+                    run_text = f"第{entry['run_index']}次" if entry.get("run_index") else ""
+                    upper_name = Path(entry.get("upper_file", "")).name
+                    lower_name = Path(entry.get("lower_file", "")).name
+                    file_text = " / ".join(value for value in (upper_name, lower_name) if value)
+                    if d is None:
+                        det_rows.append([
+                            run_text, file_text, mark_id, "", "", "", "", "", "", "", "", "",
+                            "异常", quality_profile_display(self.config), "未评估", "", "", "", "", entry.get("error", ""),
+                        ])
+                        continue
                     if d.fitting_mode == "Rectangle":
                         width_um, height_um = rotated_rect_size_um(
                             d.shape_params.get("width_px", 0),
@@ -1026,9 +1179,9 @@ class MainWindowStateMixin:
                             f"角度={d.shape_params.get('angle_deg', 0):.3f}°"
                         )
                     elif d.fitting_mode == "Ellipse":
-                        angle_deg = d.shape_params.get("angle_deg", 0)
-                        major_um = d.shape_params.get("major_px", 0) * axis_scale_um_per_px(self.config, angle_deg)
-                        minor_um = d.shape_params.get("minor_px", 0) * axis_scale_um_per_px(self.config, angle_deg + 90.0)
+                        metrics = ellipse_metrics_um(d.shape_params, self.config)
+                        major_um = metrics.get("ellipse_major_um", 0.0)
+                        minor_um = metrics.get("ellipse_minor_um", 0.0)
                         shape_txt = (
                             f"长轴={major_um:.3f}μm, "
                             f"短轴={minor_um:.3f}μm, "
@@ -1113,10 +1266,13 @@ class MainWindowStateMixin:
                     display_mark_id = mark_id
                     if not self._is_auto_workflow() and (mark_id, layer) in manual_labels:
                         display_mark_id = f"{mark_id} [{manual_labels[(mark_id, layer)]}]"
+                    ellipse_roundness = ""
+                    if d.fitting_mode == "Ellipse":
+                        ellipse_roundness = f"{ellipse_metrics_um(d.shape_params, self.config).get('ellipse_roundness_um', 0.0):.3f}"
                     det_rows.append([
-                        display_mark_id, LAYER_LABELS.get(layer, layer),
+                        run_text, file_text, display_mark_id, LAYER_LABELS.get(layer, layer),
                         f"{d.center_x_um:.3f}", f"{d.center_y_um:.3f}",
-                        f"{d.diameter_um:.3f}", f"{d.residual_um:.3f}",
+                        f"{d.diameter_um:.3f}", ellipse_roundness, f"{d.residual_um:.3f}",
                         str(d.edge_point_count), f"{d.confidence:.3f}", mode_txt,
                         {"Valid": "有效", "Invalid": "无效"}.get(d.shape_params.get("quality_status", ""), ""),
                         d.shape_params.get("quality_profile_label", quality_profile_display(self.config)),
@@ -1125,9 +1281,12 @@ class MainWindowStateMixin:
                         f"{d.shape_params.get('coverage', 0):.1%}" if "coverage" in d.shape_params else "",
                         shape_txt + "; " + roi_txt,
                         d.shape_params.get("algorithm_path", describe_algorithm_path(d, "Auto" if self._is_auto_workflow() else "Manual")),
-                        d.warning,
+                        d.warning or entry.get("error", ""),
                     ])
             self._fill_table(self.det_table, det_headers, det_rows)
+            roundness_header = self.det_table.horizontalHeaderItem(7)
+            if roundness_header is not None:
+                roundness_header.setToolTip("椭圆圆度=(物理长轴-物理短轴)/2；非 ISO 最小区域圆度")
 
             ov_headers = ["项目", "Dx/Dy/Dxy/Rz", "数值", "判定", "质量门槛", "实际质量", "质量详情", "提示"]
             ov_rows = []
