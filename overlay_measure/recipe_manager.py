@@ -5,6 +5,7 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Dict, List
 
+from .geometry_models import GeometryProgram
 from .models import DetectionParams, MarkRecipe, MeasurementConfig, Roi
 
 
@@ -18,12 +19,19 @@ def _roi_from_dict(data):
     return Roi(**data)
 
 
-def save_recipe(path: str, config: MeasurementConfig, params: DetectionParams, marks: List[MarkRecipe]) -> None:
+def save_recipe(
+    path: str,
+    config: MeasurementConfig,
+    params: DetectionParams,
+    marks: List[MarkRecipe],
+    geometry_program: GeometryProgram | None = None,
+) -> None:
     data = {
-        "software_name": "Overlay Mark Measurement Software",
-        "version": "1.9.0",
+        "software_name": "SOMA Vision Metrology",
+        "version": "2.0.0",
         "measurement_config": asdict(config),
         "detection_params": asdict(params),
+        "geometry_program": (geometry_program or GeometryProgram()).to_dict(),
         "marks": [
             {
                 "mark_id": m.mark_id,
@@ -67,3 +75,14 @@ def load_recipe(path: str):
             )
         )
     return config, params, marks
+
+
+def load_recipe_with_geometry(path: str):
+    """Load a recipe while preserving the legacy three-value API.
+
+    ``load_recipe`` remains unchanged for integrations built against V1.x.
+    New UI code uses this helper to read the optional V2 geometry program.
+    """
+    config, params, marks = load_recipe(path)
+    data = json.loads(Path(path).read_text(encoding="utf-8"))
+    return config, params, marks, GeometryProgram.from_dict(data.get("geometry_program"))

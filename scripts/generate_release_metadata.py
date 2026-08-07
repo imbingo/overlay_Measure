@@ -36,11 +36,11 @@ VSVersionInfo(
         u'080404B0',
         [
           StringStruct(u'CompanyName', u'GCT'),
-          StringStruct(u'FileDescription', u'对位偏差测量软件'),
+          StringStruct(u'FileDescription', u'SOMA Vision Metrology - 视觉轮廓与对位量测平台'),
           StringStruct(u'FileVersion', u'{dotted_version}'),
           StringStruct(u'InternalName', u'OverlayMeasure'),
           StringStruct(u'OriginalFilename', u'OverlayMeasure.exe'),
-          StringStruct(u'ProductName', u'对位偏差测量软件'),
+          StringStruct(u'ProductName', u'SOMA Vision Metrology'),
           StringStruct(u'ProductVersion', u'{version}')
         ]
       )
@@ -65,7 +65,7 @@ def write_manifest(path: Path, artifact: Path, version: str) -> None:
     checksum = sha256(artifact)
     payload = {
         "schema_version": 1,
-        "product": "Overlay Measure",
+        "product": "SOMA Vision Metrology",
         "channel": "stable",
         "version": version,
         "artifact": artifact.name,

@@ -24,12 +24,12 @@ def test_main_window_algorithm_path_status_button_smoke(monkeypatch):
     window.show()
     app.processEvents()
 
-    assert "V1.9.0" in window.windowTitle()
+    assert "SOMA Vision Metrology V2.0.0" in window.windowTitle()
     assert not window.windowIcon().isNull()
     assert window.windowFlags() & Qt.FramelessWindowHint
     assert window.title_bar.height() == 46
     assert window.command_bar.objectName() == "commandBar"
-    assert window.version_label.text() == "V1.9.0"
+    assert window.version_label.text() == "V2.0.0"
     assert window.batch_detail_combo.count() == 0
     assert window.batch_detail_bar.isHidden()
     assert window.operation_mode == "Production"
@@ -53,8 +53,8 @@ def test_main_window_algorithm_path_status_button_smoke(monkeypatch):
     assert window.current_recipe_label.text() == "当前配方：未加载"
     assert window.main_splitter.count() == 2
     assert not window.display_enhance_check.isChecked()
-    assert window.result_tabs.count() == 3
-    assert [window.result_tabs.tabText(i) for i in range(window.result_tabs.count())] == ["识别明细", "对位结果", "重复性分析"]
+    assert window.result_tabs.count() == 4
+    assert [window.result_tabs.tabText(i) for i in range(window.result_tabs.count())] == ["识别明细", "对位结果", "尺寸结果", "重复性分析"]
     assert "暂无测量结果" in window.algorithm_path_text
     assert "暂无测量结果" in window.algorithm_path_button.toolTip()
     assert not hasattr(window, "algorithm_path_label")

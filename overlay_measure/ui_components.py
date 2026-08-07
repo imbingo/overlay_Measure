@@ -52,6 +52,7 @@ from .auto_mark_detector import detect_auto_marks_with_report
 from .access_control import AccessController
 from .batch_pairing import validate_batch_pairing
 from .candidate_ordering import candidate_display_label
+from .geometry_models import GeometryProgram, GeometryRunResult
 from .export_naming import build_export_filename
 from .image_loader import SUPPORTED_EXTENSIONS, display_to_uint8, load_image
 from .measurement_engine import run_measurement_job
@@ -163,6 +164,7 @@ class CollapsibleSection(QWidget):
 
 class ImageCanvas(QLabel):
     roiChanged = Signal(str, str, object)  # mark_id, layer, Roi
+    geometryClicked = Signal(str, object)  # layer, click payload
 
     def __init__(self, title: str, fixed_layer: Optional[str] = None, parent=None):
         super().__init__(parent)
@@ -203,6 +205,10 @@ class ImageCanvas(QLabel):
         self.auto_reference_label = ""
         self.auto_target_label = ""
         self.show_diagnostics = False
+        self.geometry_program = GeometryProgram()
+        self.geometry_result = GeometryRunResult()
+        self.geometry_interaction_active = False
+        self.selected_geometry_feature_id = ""
         self.selected_caliper_feature = None
         self.selected_caliper_detection_id = None
         self.caliper_selection_context = None
@@ -299,6 +305,63 @@ class ImageCanvas(QLabel):
         self.show_diagnostics = bool(show_diagnostics)
         self._drop_stale_caliper_selection()
         self.update()
+
+    def set_geometry_context(
+        self,
+        program: Optional[GeometryProgram],
+        result: Optional[GeometryRunResult],
+        interaction_active: bool = False,
+    ):
+        self.geometry_program = program or GeometryProgram()
+        self.geometry_result = result or GeometryRunResult()
+        self.geometry_interaction_active = bool(interaction_active)
+        self.update()
+
+    def set_geometry_interaction_active(self, active: bool):
+        self.geometry_interaction_active = bool(active)
+        self.setCursor(Qt.CrossCursor if active else Qt.ArrowCursor)
+        self.update()
+
+    def _geometry_hit(self, pos, tolerance_px: float = 10.0) -> str:
+        best_id = ""
+        best_distance = float(tolerance_px)
+        for feature_id, feature in self.geometry_result.features.items():
+            if feature.status != "Valid" or feature.layer != self.active_layer:
+                continue
+            if feature.center_px is not None:
+                wx, wy = self.image_to_widget(*feature.center_px)
+                distance = float(np.hypot(wx - pos.x(), wy - pos.y()))
+                if feature.radius_px is not None:
+                    radial = abs(distance - feature.radius_px * self.scale)
+                    distance = min(distance, radial)
+                if distance < best_distance:
+                    best_id, best_distance = feature_id, distance
+            if len(feature.points_px) >= 2 and feature.feature_type == "line":
+                a = np.asarray(self.image_to_widget(*feature.points_px[0]), dtype=float)
+                b = np.asarray(self.image_to_widget(*feature.points_px[1]), dtype=float)
+                p = np.asarray([pos.x(), pos.y()], dtype=float)
+                segment = b - a
+                denom = float(np.dot(segment, segment))
+                if denom > 1e-12:
+                    t = float(np.clip(np.dot(p - a, segment) / denom, 0.0, 1.0))
+                    distance = float(np.linalg.norm(p - (a + t * segment)))
+                    if distance < best_distance:
+                        best_id, best_distance = feature_id, distance
+        return best_id
+
+    def _detection_key_hit(self, pos, tolerance_px: float = 10.0) -> str:
+        maps = self.auto_detections if self.show_auto_detections else self.detections
+        best_key = ""
+        best_distance = float(tolerance_px)
+        for identity, layer_map in maps.items():
+            for layer, detection in layer_map.items():
+                if layer != self.active_layer:
+                    continue
+                distance = self._detection_hit_distance(detection, pos)
+                if distance < best_distance:
+                    prefix = f"{self.active_mark_id}/" if self.show_auto_detections else ""
+                    best_key, best_distance = f"{prefix}{identity}:{layer}", distance
+        return best_key
 
     def clear_caliper_selection(self, update: bool = True):
         self.selected_caliper_feature = None
@@ -884,6 +947,7 @@ class ImageCanvas(QLabel):
         painter.drawPixmap(target, self.pixmap_cache, QRectF(self.pixmap_cache.rect()))
 
         self._draw_overlays(painter)
+        self._draw_geometry_overlays(painter)
 
         header_rect = QRectF(8, 8, min(270, self.width() - 16), 48)
         painter.fillRect(header_rect, QColor(18, 21, 26, 185))
@@ -911,6 +975,62 @@ class ImageCanvas(QLabel):
             painter.drawText(hint_rect.adjusted(8, 0, -8, 0), Qt.AlignVCenter | Qt.AlignLeft, hint)
         self._draw_scale_and_axes(painter)
         painter.end()
+
+    def _draw_geometry_overlays(self, painter: QPainter):
+        result = self.geometry_result
+        if result is None:
+            return
+        feature_pen = QPen(QColor("#34C759"), 2.0)
+        feature_pen.setCosmetic(True)
+        selected_pen = QPen(QColor("#FFD60A"), 2.5)
+        selected_pen.setCosmetic(True)
+        for feature_id, feature in result.features.items():
+            if feature.status != "Valid" or feature.layer != self.active_layer:
+                continue
+            painter.setPen(selected_pen if feature_id == self.selected_geometry_feature_id else feature_pen)
+            if feature.center_px is not None:
+                cx, cy = self.image_to_widget(*feature.center_px)
+                painter.drawLine(int(cx - 6), int(cy), int(cx + 6), int(cy))
+                painter.drawLine(int(cx), int(cy - 6), int(cx), int(cy + 6))
+                painter.drawText(int(cx + 8), int(cy - 8), feature.name)
+                if feature.radius_px is not None:
+                    radius = float(feature.radius_px) * self.scale
+                    painter.drawEllipse(QRectF(cx - radius, cy - radius, 2.0 * radius, 2.0 * radius))
+            if feature.feature_type == "line" and len(feature.points_px) >= 2:
+                first = self.image_to_widget(*feature.points_px[0])
+                second = self.image_to_widget(*feature.points_px[1])
+                painter.drawLine(QPointF(*first), QPointF(*second))
+
+        axis_pen = QPen(QColor("#00C7BE"), 2.0)
+        axis_pen.setCosmetic(True)
+        for coordinate in result.coordinate_systems.values():
+            if coordinate.status != "Valid" or coordinate.layer != self.active_layer or coordinate.origin_px is None:
+                continue
+            origin = self.image_to_widget(*coordinate.origin_px)
+            axis_length = 62.0
+            x_axis = coordinate.x_axis_image or (1.0, 0.0)
+            y_axis = coordinate.y_axis_image or (0.0, -1.0)
+            painter.setPen(axis_pen)
+            painter.drawLine(QPointF(*origin), QPointF(origin[0] + x_axis[0] * axis_length, origin[1] + x_axis[1] * axis_length))
+            painter.drawLine(QPointF(*origin), QPointF(origin[0] + y_axis[0] * axis_length, origin[1] + y_axis[1] * axis_length))
+            painter.drawText(int(origin[0] + x_axis[0] * axis_length + 4), int(origin[1] + x_axis[1] * axis_length), "X")
+            painter.drawText(int(origin[0] + y_axis[0] * axis_length + 4), int(origin[1] + y_axis[1] * axis_length), "Y")
+
+        label_pen = QPen(QColor("#FFFFFF"), 1.2)
+        label_pen.setCosmetic(True)
+        for label in result.coordinate_labels.values():
+            if label.status != "Valid" or label.layer != self.active_layer or label.anchor_px is None or label.label_px is None:
+                continue
+            anchor = self.image_to_widget(*label.anchor_px)
+            target = self.image_to_widget(*label.label_px)
+            painter.setPen(label_pen)
+            painter.drawLine(QPointF(*anchor), QPointF(*target))
+            text = f"{label.name}  X={label.x_um:.3f} μm  Y={label.y_um:.3f} μm"
+            metrics = painter.fontMetrics()
+            rect = metrics.boundingRect(text).adjusted(-7, -5, 7, 5)
+            rect.moveTopLeft(QPoint(int(target[0]), int(target[1] - rect.height())))
+            painter.fillRect(rect, QColor(18, 21, 26, 210))
+            painter.drawText(rect, Qt.AlignCenter, text)
 
     def _draw_scale_and_axes(self, painter: QPainter):
         if self.pixmap_cache is None or self.scale <= 0:
@@ -1259,6 +1379,23 @@ class ImageCanvas(QLabel):
             event.accept()
             return
         if event.button() == Qt.LeftButton:
+            if self.geometry_interaction_active:
+                point = self.widget_to_image_float(event.position().toPoint())
+                if point is not None:
+                    feature_id = self._geometry_hit(event.position().toPoint())
+                    detection_key = self._detection_key_hit(event.position().toPoint())
+                    self.selected_geometry_feature_id = feature_id
+                    self.geometryClicked.emit(
+                        self.active_layer,
+                        {
+                            "point_px": (float(point[0]), float(point[1])),
+                            "feature_id": feature_id,
+                            "detection_key": detection_key,
+                        },
+                    )
+                    self.update()
+                event.accept()
+                return
             if self.show_auto_detections:
                 hit = self._nearest_auto_caliper_hit(event.position().toPoint())
                 if hit is not None:

@@ -55,6 +55,7 @@ from .candidate_ordering import assign_spatial_candidate_ids, candidate_display_
 from .export_naming import build_export_filename
 from .image_loader import SUPPORTED_EXTENSIONS, display_to_uint8, load_image
 from .measurement_engine import run_measurement_job
+from .geometry_models import GeometryProgram, GeometryRunResult
 from .measurement_service import attach_algorithm_path, describe_algorithm_path, detect_manual_roi
 from .measurement_units import axis_scale_um_per_px, rotated_rect_size_um
 from .models import DetectionParams, DetectionResult, ImageData, MarkRecipe, MeasurementConfig, OverlayResult, Roi
@@ -70,7 +71,7 @@ from .quality_profiles import (
 from .recipe_manager import load_recipe, save_recipe
 from .recipe_library import RecipeLibrary, RecipeLibraryEntry
 from .recipe_integrity import seal_recipe, verify_recipe
-from .result_exporter import build_detection_failure_row, build_detection_rows, export_results
+from .result_exporter import build_detection_failure_row, build_detection_rows, build_geometry_rows, export_results
 from .rz_calculator import build_summary_rows
 from .runtime_support import RecoveryStore, build_runtime_logger
 
@@ -877,6 +878,10 @@ class MainWindowWorkflowMixin:
             self.batch_images = {"Mark1": {"upper": [], "lower": []}, "Mark2": {"upper": [], "lower": []}}
             self.batch_overlays = {"Mark1": [], "Mark2": []}
             self.batch_run_records = {"Mark1": [], "Mark2": []}
+            self.geometry_program = GeometryProgram()
+            self.geometry_result = GeometryRunResult()
+            self.batch_geometry_results = []
+            self._geometry_interaction = None
             self._batch_detail_run_index = 1
             self._batch_detail_last_single_index = 1
             self.roi_sources = self._empty_roi_sources()
@@ -1165,6 +1170,7 @@ class MainWindowWorkflowMixin:
                 "selections": deepcopy(self.auto_selections),
                 "batch": self._is_batch_mode(),
                 "roi_sources": deepcopy(self.roi_sources),
+                "geometry_program": self.geometry_program_snapshot(),
                 "traceability": {
                     "recipe_path": self.loaded_recipe_path,
                     "recipe_hash": self.loaded_recipe_hash,
@@ -1376,6 +1382,8 @@ class MainWindowWorkflowMixin:
             self.auto_selections = payload.get("selections", self.auto_selections)
             self.batch_overlays = payload.get("batch_overlays", {"Mark1": [], "Mark2": []})
             self.batch_run_records = payload.get("batch_records", {"Mark1": [], "Mark2": []})
+            self.geometry_result = payload.get("geometry_result", GeometryRunResult())
+            self.batch_geometry_results = payload.get("batch_geometry_results", [])
             self._refresh_batch_detail_selector(default_first=bool(payload.get("batch")))
             self._sync_current_mark_images()
             self._refresh_auto_selection_combos()
@@ -1402,6 +1410,7 @@ class MainWindowWorkflowMixin:
                 for mark_id, item in result_map.items()
             ]
             notes = list(payload.get("warnings", [])) + list(payload.get("skipped", []))
+            geometry_count = len(self.geometry_result.measurements) + len(self.geometry_result.coordinate_labels)
             if lines:
                 message = "计算完成：\n" + "\n".join(lines)
                 if self.last_measurement_id:
@@ -1409,8 +1418,18 @@ class MainWindowWorkflowMixin:
                 if notes:
                     message += "\n\n提示：\n" + "\n".join(notes)
                 QMessageBox.information(self, "计算完成", message)
+            elif geometry_count:
+                invalid_count = sum(
+                    item.status != "Valid" for item in self.geometry_result.measurements.values()
+                ) + sum(
+                    item.status != "Valid" for item in self.geometry_result.coordinate_labels.values()
+                )
+                message = f"测量程序完成：生成 {geometry_count} 项尺寸/坐标结果"
+                if invalid_count:
+                    message += f"，其中 {invalid_count} 项无效，请查看尺寸结果。"
+                QMessageBox.information(self, "运行完成", message)
             else:
-                QMessageBox.warning(self, "计算对位偏差", "未生成任何对位结果。\n" + "\n".join(notes))
+                QMessageBox.warning(self, "运行测量程序", "未生成任何对位或尺寸结果。\n" + "\n".join(notes))
 
         def _on_calculation_failed(self, message: str):
             self._calculation_timeout_timer.stop()
@@ -1459,7 +1478,12 @@ class MainWindowWorkflowMixin:
         def export_result_file(self):
             display_detections = self._display_detections()
             has_batch_details = self._is_batch_mode() and any(self.batch_run_records.values())
-            if not display_detections and not has_batch_details:
+            has_geometry = bool(
+                self.geometry_result.features
+                or self.geometry_result.measurements
+                or self.geometry_result.coordinate_labels
+            )
+            if not display_detections and not has_batch_details and not has_geometry:
                 QMessageBox.warning(self, "无结果", "当前没有可导出的分析结果。")
                 return
             self._pull_config_from_ui()
@@ -1568,6 +1592,12 @@ class MainWindowWorkflowMixin:
                         ))
                 with TemporaryDirectory() as tmp_dir:
                     mark_images = self._build_mark_image_exports(tmp_dir)
+                    geometry_rows = []
+                    if self.batch_geometry_results:
+                        for index, geometry_result in enumerate(self.batch_geometry_results, start=1):
+                            geometry_rows.extend(build_geometry_rows(geometry_result, self.config, index))
+                    else:
+                        geometry_rows = build_geometry_rows(self.geometry_result, self.config)
                     export_results(
                         path,
                         rows,
@@ -1575,6 +1605,7 @@ class MainWindowWorkflowMixin:
                         summary_rows=self._build_summary_rows(),
                         mark_images=mark_images,
                         repeatability_rows=self._build_repeatability_export_rows(),
+                        geometry_rows=geometry_rows,
                         traceability_info={
                             "measurement_id": self.last_measurement_id,
                             "operation_mode": "生产模式" if self.operation_mode == "Production" else "工程模式",

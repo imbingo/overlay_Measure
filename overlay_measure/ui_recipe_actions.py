@@ -66,7 +66,8 @@ from .quality_profiles import (
     quality_profile_display,
     quality_profile_is_modified,
 )
-from .recipe_manager import load_recipe, save_recipe
+from .geometry_models import GeometryRunResult
+from .recipe_manager import load_recipe, load_recipe_with_geometry, save_recipe
 from .recipe_library import RecipeLibrary, RecipeLibraryEntry
 from .recipe_integrity import seal_recipe, verify_recipe
 from .result_exporter import build_detection_rows, export_results
@@ -142,11 +143,13 @@ class MainWindowRecipeMixin:
             if confirm_switch and not self._confirm_recipe_switch(path):
                 return False
             try:
-                config, params, marks = load_recipe(path)
+                config, params, marks, geometry_program = load_recipe_with_geometry(path)
                 self.config = config
                 if not getattr(self.config, "recipe_name", "").strip():
                     self.config.recipe_name = Path(path).stem
                 self.params = params
+                self.geometry_program = geometry_program
+                self.geometry_result = GeometryRunResult()
                 loaded_marks = {mark.mark_id: mark for mark in marks if mark.mark_id in {"Mark1", "Mark2"}}
                 self.marks = {
                     mark_id: loaded_marks.get(mark_id, MarkRecipe(mark_id))
@@ -284,7 +287,13 @@ class MainWindowRecipeMixin:
             if not path:
                 return
             try:
-                save_recipe(path, self.config, self.params, list(self.marks.values()))
+                save_recipe(
+                    path,
+                    self.config,
+                    self.params,
+                    list(self.marks.values()),
+                    self.geometry_program,
+                )
                 saved_hash = seal_recipe(path)
                 saved_path = Path(path).resolve()
                 try:

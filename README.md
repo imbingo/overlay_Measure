@@ -1,14 +1,44 @@
-# Overlay Measure
+# SOMA Vision Metrology
 
-对位偏差测量软件，用于识别 Upper / Lower mark 的中心位置，并计算对位偏差 `Dx`、`Dy`、`Dxy` 和 `Rz` 等结果。
+**See Once, Measure All**
+
+视觉轮廓与对位量测平台。软件在原有 Upper / Lower Mark 对位偏差量测基础上，增加轮廓要素、物理坐标系和二维几何尺寸测量。
 
 ## 当前版本
 
-- 当前代码版本：V1.9.0
+- 当前代码版本：V2.0.0
 - 来源文件：`overlay_mark_measure_v1_4_2.zip`
 - Windows 启动文件：`start_overlay_measure.bat`
 - Python 主入口：`main.py`
 - 主界面代码：`overlay_measure/ui_main.py`
+
+## V2.0.0 更新说明
+
+### SOMA 品牌与统一工作区
+
+- UI 使用 `SOMA Vision Metrology`、`See Once, Measure All` 和“视觉轮廓与对位量测平台”统一品牌区。
+- 保留 V1.9 的单图/双图、ROI、算法、质量、批量与对位结果架构，在右侧增加“轮廓测量”，不创建割裂的独立量测页面。
+- 顶部“运行测量程序”会执行当前已配置的 ROI/自动识别、对位偏差和轮廓测量项目；未配置的部分自动跳过。
+
+### 要素、坐标系与尺寸
+
+- 要素工具：点、直线、圆、最小外接圆、稳健外轮廓圆、交点、中点、投影点。
+- 坐标系支持两圆心建轴、两点建轴、点原点加直线轴，以及 `-180°~180°` 附加旋转。
+- 物理坐标定义为 X 向右、Y 向上、逆时针为正，并正确支持 X/Y 非等比例像素标定。
+- 测量工具支持坐标标注、点点距离、圆心距、点线距离、直线角度、两线夹角和直径。
+- 坐标标注可在图上放置引线与 `X/Y` 数值；右侧不显示冗余的“已创建要素/测量项目”列表，结果统一进入画布和底部“尺寸结果”。
+
+### 配方、批量与导出
+
+- V2 Recipe 增加可选 `geometry_program`，旧 V1.x Recipe 可直接加载。
+- 批量任务对每次图像执行同一轮廓测量程序并保留结果。
+- Excel 增加“尺寸结果”Sheet，包含要素、坐标系、坐标标注、尺寸值、有效性、质量、算法路径和错误信息。
+
+### 下载
+
+- [下载 V2.0.0 Setup](https://github.com/imbingo/overlay-measure/releases/download/v2.0.0/SOMA_Vision_Metrology_V2.0.0_Setup.exe)
+- [查看 V2.0.0 Release](https://github.com/imbingo/overlay-measure/releases/tag/v2.0.0)
+- [查看完整版本记录](CHANGELOG.md)
 
 ## V1.9.0 更新说明
 

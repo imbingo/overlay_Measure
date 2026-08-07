@@ -54,6 +54,7 @@ from .batch_pairing import validate_batch_pairing
 from .export_naming import build_export_filename
 from .image_loader import SUPPORTED_EXTENSIONS, display_to_uint8, load_image
 from .measurement_engine import run_measurement_job
+from .geometry_models import GeometryProgram, GeometryRunResult
 from .measurement_service import attach_algorithm_path, describe_algorithm_path, detect_manual_roi
 from .measurement_units import axis_scale_um_per_px, rotated_rect_size_um
 from .models import DetectionParams, DetectionResult, ImageData, MarkRecipe, MeasurementConfig, OverlayResult, Roi
@@ -66,7 +67,7 @@ from .quality_profiles import (
     quality_profile_display,
     quality_profile_is_modified,
 )
-from .recipe_manager import load_recipe, save_recipe
+from .recipe_manager import load_recipe, load_recipe_with_geometry, save_recipe
 from .recipe_library import RecipeLibrary, RecipeLibraryEntry
 from .recipe_integrity import seal_recipe, verify_recipe
 from .result_exporter import build_detection_rows, export_results
@@ -91,6 +92,7 @@ from .ui_builders import MainWindowBuilderMixin
 from .ui_state import MainWindowStateMixin
 from .ui_workflows import MainWindowWorkflowMixin
 from .ui_recipe_actions import MainWindowRecipeMixin
+from .ui_geometry import MainWindowGeometryMixin
 
 
 def application_icon_path() -> Path:
@@ -124,6 +126,7 @@ def application_icon_path() -> Path:
 class MainWindow(
     FramelessWindowMixin,
     QMainWindow,
+    MainWindowGeometryMixin,
     MainWindowBuilderMixin,
     MainWindowStateMixin,
     MainWindowWorkflowMixin,
@@ -135,7 +138,7 @@ class MainWindow(
             if font_path.exists() and QFontDatabase.addApplicationFont(str(font_path)) >= 0:
                 break
         self.setFont(QFont("Microsoft YaHei UI", 9))
-        self.setWindowTitle("对位偏差测量软件 V1.9.0")
+        self.setWindowTitle("SOMA Vision Metrology V2.0.0")
         icon_path = application_icon_path()
         if icon_path.exists():
             self.setWindowIcon(QIcon(str(icon_path)))
@@ -200,6 +203,7 @@ class MainWindow(
         self._calculation_worker: Optional[MeasurementWorker] = None
         self._calculation_running = False
         self.step_rows = []
+        self._initialize_geometry_state()
 
         self._apply_window_style()
         self._build_ui()
@@ -409,7 +413,7 @@ class MainWindow(
             self.import_upper_btn: "导入上层" if compact else "导入上层/单图",
             self.import_lower_btn: "导入下层" if compact else "导入下层图像",
             self.save_recipe_btn: "保存配方",
-            self.analyze_all_btn: "计算" if compact else "计算对位偏差",
+            self.analyze_all_btn: "运行" if compact else "运行测量程序",
             self.export_btn: "导出" if compact else "导出结果",
         }
         for button, text in labels.items():

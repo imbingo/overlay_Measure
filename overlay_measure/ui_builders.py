@@ -157,20 +157,27 @@ class MainWindowBuilderMixin:
             toolbar.setSpacing(6)
             title_row = QHBoxLayout()
             title_row.setSpacing(9)
-            self.brand_dot_label = QLabel("●")
-            self.brand_dot_label.setObjectName("brandDot")
-            self.title_label = QLabel("对位偏差测量软件")
+            self.brand_icon_label = QLabel()
+            self.brand_icon_label.setFixedSize(36, 36)
+            self.brand_icon_label.setPixmap(self.windowIcon().pixmap(32, 32))
+            brand_text = QVBoxLayout()
+            brand_text.setSpacing(0)
+            self.title_label = QLabel("SOMA Vision Metrology")
             self.title_label.setObjectName("titleLabel")
-            self.title_label.setMinimumWidth(142)
-            self.version_label = QLabel("V1.9.0")
+            self.title_label.setMinimumWidth(178)
+            self.brand_subtitle_label = QLabel("See Once, Measure All  ·  视觉轮廓与对位量测平台")
+            self.brand_subtitle_label.setObjectName("statusCaption")
+            self.version_label = QLabel("V2.0.0")
             self.version_label.setObjectName("versionLabel")
             self.operation_mode_combo = QComboBox()
             self.operation_mode_combo.setObjectName("accessMode")
             self.operation_mode_combo.addItem("生产模式", "Production")
             self.operation_mode_combo.addItem("工程模式", "Engineering")
             self.operation_mode_combo.setFixedWidth(112)
-            title_row.addWidget(self.brand_dot_label)
-            title_row.addWidget(self.title_label)
+            brand_text.addWidget(self.title_label)
+            brand_text.addWidget(self.brand_subtitle_label)
+            title_row.addWidget(self.brand_icon_label)
+            title_row.addLayout(brand_text)
             title_row.addWidget(self.version_label)
             title_row.addWidget(self.operation_mode_combo)
             title_row.addStretch(1)
@@ -180,7 +187,7 @@ class MainWindowBuilderMixin:
             self.load_recipe_btn = QPushButton("当前配方：未加载  ▾")
             self.recipe_manage_btn = QPushButton("配方管理")
             self.save_recipe_btn = QPushButton("保存配方")
-            self.analyze_all_btn = QPushButton("计算对位偏差")
+            self.analyze_all_btn = QPushButton("运行测量程序")
             self.export_btn = QPushButton("导出结果")
             self.import_upper_btn.setIcon(self.style().standardIcon(QStyle.SP_DialogOpenButton))
             self.import_lower_btn.setIcon(self.style().standardIcon(QStyle.SP_DialogOpenButton))
@@ -337,8 +344,16 @@ class MainWindowBuilderMixin:
             self.repeat_table.setMinimumHeight(300)
             repeat_layout.addWidget(self.repeat_table, stretch=1)
 
+            geometry_tab = QWidget()
+            geometry_layout = QVBoxLayout(geometry_tab)
+            geometry_layout.setContentsMargins(0, 0, 0, 0)
+            self.geometry_table = QTableWidget()
+            self.geometry_table.setMinimumHeight(300)
+            geometry_layout.addWidget(self.geometry_table)
+
             self.result_tabs.addTab(detail_tab, "识别明细")
             self.result_tabs.addTab(overlay_tab, "对位结果")
+            self.result_tabs.addTab(geometry_tab, "尺寸结果")
             self.result_tabs.addTab(repeat_tab, "重复性分析")
             self.result_tabs.setMinimumHeight(255)
             result_layout.addWidget(self.result_tabs, stretch=1)
@@ -352,7 +367,8 @@ class MainWindowBuilderMixin:
                 (self._build_image_tab(), "② 图像导入"),
                 (self._build_roi_tab(), "③ ROI 设置"),
                 (self._build_algo_tab(), "④ 算法参数"),
-                (self._build_spec_tab(), "⑤ 结果导出"),
+                (self._build_geometry_tab(), "⑤ 轮廓测量"),
+                (self._build_spec_tab(), "⑥ 结果导出"),
             ):
                 scroll = QScrollArea()
                 scroll.setWidgetResizable(True)
@@ -943,7 +959,7 @@ class MainWindowBuilderMixin:
             form.addRow("|ΔY| 上限 (μm)", self.dy_limit_spin)
             form.addRow("对位 R 上限 (μm)", self.r_limit_spin)
             layout.addWidget(group)
-            note = QLabel("导出的报告格式与 V1.0.5 保持一致。")
+            note = QLabel("Excel 同时导出识别明细、对位结果、重复性与尺寸结果。")
             note.setObjectName("statusCaption")
             layout.addWidget(note)
             layout.addStretch(1)
@@ -1012,6 +1028,8 @@ class MainWindowBuilderMixin:
             self.clear_recipe_rois_btn.clicked.connect(self.clear_all_recipe_rois)
             self.upper_canvas.roiChanged.connect(self.set_roi)
             self.lower_canvas.roiChanged.connect(self.set_roi)
+            self.upper_canvas.geometryClicked.connect(self._on_geometry_canvas_clicked)
+            self.lower_canvas.geometryClicked.connect(self._on_geometry_canvas_clicked)
             # QPushButton.clicked emits a checked boolean. Passing that signal
             # directly used to overwrite show_message=False and silently suppress
             # every error dialog for a normal (unchecked) button click.

@@ -1,8 +1,8 @@
 #ifndef AppVersion
-  #define AppVersion "1.9.0"
+  #define AppVersion "2.0.0"
 #endif
 
-#define AppName "对位偏差测量软件"
+#define AppName "SOMA Vision Metrology"
 #define AppPublisher "GCT"
 #define AppExeName "OverlayMeasure.exe"
 #define AppIdValue "{{c27d6ac0-0b46-4782-9a97-04f96bcdfcd8}"
@@ -17,7 +17,7 @@ DefaultDirName={autopf}\Overlay Measure
 DefaultGroupName={#AppName}
 DisableProgramGroupPage=yes
 OutputDir=..\release
-OutputBaseFilename=OverlayMeasure_Setup_V{#AppVersion}
+OutputBaseFilename=SOMA_Vision_Metrology_V{#AppVersion}_Setup
 Compression=lzma2/ultra64
 SolidCompression=yes
 WizardStyle=modern
@@ -32,7 +32,7 @@ SetupIconFile=..\assets\overlay_measure.ico
 SetupLogging=yes
 VersionInfoVersion={#AppVersion}
 VersionInfoCompany={#AppPublisher}
-VersionInfoDescription={#AppName} 安装程序
+VersionInfoDescription={#AppName} Setup
 VersionInfoProductName={#AppName}
 VersionInfoProductVersion={#AppVersion}
 
@@ -40,7 +40,7 @@ VersionInfoProductVersion={#AppVersion}
 Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Tasks]
-Name: "desktopicon"; Description: "创建桌面快捷方式"; GroupDescription: "附加任务："; Flags: unchecked
+Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription: "Additional shortcuts:"; Flags: unchecked
 
 [Files]
 Source: "..\dist\OverlayMeasure\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
@@ -50,7 +50,7 @@ Name: "{autoprograms}\{#AppName}"; Filename: "{app}\{#AppExeName}"
 Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#AppExeName}"; Tasks: desktopicon
 
 [Run]
-Filename: "{app}\{#AppExeName}"; Description: "启动{#AppName}"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\{#AppExeName}"; Description: "Launch {#AppName}"; Flags: nowait postinstall skipifsilent
 
 [UninstallDelete]
 Type: filesandordirs; Name: "{app}"

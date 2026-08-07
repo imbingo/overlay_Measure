@@ -160,6 +160,7 @@ class MainWindowStateMixin:
             engineering = self.operation_mode == "Engineering"
             self.side_tabs.setTabEnabled(2, engineering)
             self.side_tabs.setTabEnabled(3, engineering)
+            self.side_tabs.setTabEnabled(4, engineering)
             self.save_recipe_btn.setEnabled(engineering and not self._calculation_running)
             self.diagnostic_check.setEnabled(engineering)
             self.change_engineering_password_btn.setEnabled(engineering and not self._calculation_running)
@@ -173,7 +174,7 @@ class MainWindowStateMixin:
                 self.calibration_date_edit,
             ):
                 widget.setEnabled(engineering)
-            if not engineering and self.side_tabs.currentIndex() in {2, 3}:
+            if not engineering and self.side_tabs.currentIndex() in {2, 3, 4}:
                 self.side_tabs.setCurrentIndex(1)
             color = "#2468B2" if engineering else "#248A3D"
             background = "#EAF3FD" if engineering else "#F1F7F3"
@@ -577,7 +578,7 @@ class MainWindowStateMixin:
             self._refresh_quality_profile_hint()
             self._refresh_auto_selection_combos()
             self._refresh_all_widgets()
-            self._append_log(message + "，请重新计算对位偏差。")
+            self._append_log(message + "，请重新运行测量程序。")
 
         def on_quality_profile_changed(self):
             if self._updating_quality_controls:
@@ -881,7 +882,7 @@ class MainWindowStateMixin:
                 elif (self.auto_overlays if show_auto else self.overlays):
                     self.image_status_label.setText("离线分析完成")
                 else:
-                    self.image_status_label.setText("图像已加载，可分析 ROI 区域或计算对位偏差")
+                    self.image_status_label.setText("图像已加载，可分析 ROI 或运行测量程序")
             if hasattr(self, "upper_file_label"):
                 upper_img = self._image_for_layer("upper", current_mark)
                 lower_img = self._image_for_layer("lower", current_mark)
@@ -889,6 +890,8 @@ class MainWindowStateMixin:
                 self.lower_file_label.setText(Path(lower_img.path).name if lower_img and lower_img.path else "未导入")
                 if hasattr(self, "image_mode_tip_label"):
                     self.image_mode_tip_label.setText(self.mode_combo.currentText())
+            if hasattr(self, "geometry_program"):
+                self._refresh_geometry_results()
             self._refresh_tables()
             self._refresh_batch_image_table()
             self._refresh_repeatability_table()
@@ -1069,11 +1072,13 @@ class MainWindowStateMixin:
             mark = self.marks.get(current_mark)
             roi_ready = bool(mark and (mark.upper_roi is not None or mark.lower_roi is not None))
             result_ready = current_mark in (self.auto_overlays if show_auto else self.overlays)
+            geometry_ready = bool(self.geometry_result.features or self.geometry_result.measurements)
             states = [
                 ("完成", "信息可编辑"),
                 ("完成" if imported else "当前", "图像已加载" if imported else "等待导入图像"),
                 ("完成" if roi_ready or show_auto else ("当前" if imported else "待处理"), "ROI 已设置" if roi_ready else ("自动识别模式" if show_auto else "等待设置 ROI")),
                 ("完成" if imported else "待处理", "参数已就绪" if imported else "导入图像后设置"),
+                ("完成" if geometry_ready else ("当前" if result_ready else "待处理"), "轮廓测量已运行" if geometry_ready else "可选几何量测程序"),
                 ("完成" if result_ready else "待处理", "可导出结果" if result_ready else "等待计算"),
             ]
             colors = {"待处理": "#A1A1A6", "当前": "#007AFF", "完成": "#34C759", "异常": "#FF3B30"}

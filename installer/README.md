@@ -1,9 +1,9 @@
 # Windows 安装与升级
 
-V1.9.0 使用两层打包：
+V2.0.0 使用两层打包：
 
 1. PyInstaller `onedir` 构建 `dist/OverlayMeasure/`。
-2. Inno Setup 将整个运行目录封装成一个 `OverlayMeasure_Setup_Vx.y.z.exe`。
+2. Inno Setup 将整个运行目录封装成一个 `SOMA_Vision_Metrology_Vx.y.z_Setup.exe`。
 
 用户只需要运行 Setup。安装程序默认安装到：
 

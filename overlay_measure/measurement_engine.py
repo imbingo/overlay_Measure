@@ -8,6 +8,8 @@ from .auto_mark_detector import detect_auto_marks_with_report
 from .batch_results import compact_detection_map
 from .batch_pairing import validate_batch_pairing
 from .candidate_ordering import assign_spatial_candidate_ids, resolve_preferred_candidate
+from .geometry_engine import execute_geometry_program
+from .geometry_models import GeometryProgram, GeometryRunResult
 from .measurement_service import attach_algorithm_path, detect_manual_roi
 from .models import DetectionParams, DetectionResult, ImageData, MarkRecipe, MeasurementConfig, OverlayResult
 from .overlay_calculator import calculate_relative_overlay
@@ -238,6 +240,14 @@ def run_measurement_job(job: dict, progress: ProgressCallback, cancelled: Cancel
     selections = job.get("selections", {})
     is_auto = config.workflow_mode == "Auto"
     is_batch = bool(job.get("batch"))
+    geometry_program: GeometryProgram = job.get("geometry_program") or GeometryProgram()
+    geometry_configured = bool(
+        geometry_program.features
+        or geometry_program.coordinate_systems
+        or geometry_program.measurements
+        or geometry_program.coordinate_labels
+    )
+    geometry_detection_runs: Dict[int, Dict[str, DetectionResult]] = {}
     if is_batch:
         pairing_errors = validate_batch_pairing(job["batch_images"], config.mode == "Dual Image")
         if pairing_errors:
@@ -253,6 +263,8 @@ def run_measurement_job(job: dict, progress: ProgressCallback, cancelled: Cancel
         "selections": {mark_id: dict(selections.get(mark_id, {})) for mark_id in ("Mark1", "Mark2")},
         "batch_overlays": {"Mark1": [], "Mark2": []},
         "batch_records": {"Mark1": [], "Mark2": []},
+        "geometry_result": GeometryRunResult(),
+        "batch_geometry_results": [],
         "skipped": [], "warnings": [],
     }
     for mark_id in ("Mark1", "Mark2"):
@@ -298,6 +310,10 @@ def run_measurement_job(job: dict, progress: ProgressCallback, cancelled: Cancel
                     record["detections"] = compact_detection_map(measured["detections"])
                     record["candidates"] = compact_detection_map(measured["candidates"])
                     record["selection"] = dict(measured["selection"])
+                    run_geometry_detections = geometry_detection_runs.setdefault(run_index, {})
+                    for label, layer_map in measured["detections"].items():
+                        for layer, detection in layer_map.items():
+                            run_geometry_detections[f"{mark_id}/{label}:{layer}"] = detection
                 else:
                     measured = _manual_overlay(mark_id, marks[mark_id], images, params, config, selections.get(mark_id), stage, cancelled)
                     payload["detections"][mark_id] = measured["detections"]
@@ -305,13 +321,20 @@ def run_measurement_job(job: dict, progress: ProgressCallback, cancelled: Cancel
                     overlay = measured["overlay"]
                     record["detections"] = compact_detection_map(measured["detections"])
                     record["selection"] = dict(measured["selection"])
+                    run_geometry_detections = geometry_detection_runs.setdefault(run_index, {})
+                    for layer, detection in measured["detections"].items():
+                        run_geometry_detections[f"{mark_id}:{layer}"] = detection
                 if overlay is None:
-                    raise ValueError("未选择到两个有效轮廓，未生成对位结果")
-                record["overlay"] = overlay
-                if is_batch and overlay.result != "Invalid":
-                    payload["batch_overlays"][mark_id].append(overlay)
+                    if geometry_configured:
+                        record["overlay_skipped"] = "未配置成对的基准/待测轮廓，已跳过对位偏差"
+                    else:
+                        raise ValueError("未选择到两个有效轮廓，未生成对位结果")
                 else:
-                    (payload["auto_overlays"] if is_auto else payload["overlays"])[mark_id] = overlay
+                    record["overlay"] = overlay
+                    if is_batch and overlay.result != "Invalid":
+                        payload["batch_overlays"][mark_id].append(overlay)
+                    else:
+                        (payload["auto_overlays"] if is_auto else payload["overlays"])[mark_id] = overlay
             except InterruptedError:
                 raise
             except Exception as exc:
@@ -327,7 +350,9 @@ def run_measurement_job(job: dict, progress: ProgressCallback, cancelled: Cancel
         if is_batch and payload["batch_overlays"][mark_id]:
             target = payload["auto_overlays"] if is_auto else payload["overlays"]
             target[mark_id] = _mean_overlay(mark_id, payload["batch_overlays"][mark_id], config)
-        elif is_batch and payload["batch_records"][mark_id]:
+        elif is_batch and any(
+            record.get("overlay") is not None for record in payload["batch_records"][mark_id]
+        ):
             target = payload["auto_overlays"] if is_auto else payload["overlays"]
             invalid = [
                 item["overlay"] for item in payload["batch_records"][mark_id]
@@ -339,6 +364,22 @@ def run_measurement_job(job: dict, progress: ProgressCallback, cancelled: Cancel
             else:
                 errors = [item.get("error", "") for item in payload["batch_records"][mark_id] if item.get("error")]
                 target[mark_id] = _terminal_overlay(mark_id, "Error", "；".join(dict.fromkeys(errors)))
+    if geometry_configured:
+        geometry_runs = []
+        run_indexes = sorted(geometry_detection_runs) or [0]
+        for index in run_indexes:
+            geometry_runs.append(
+                execute_geometry_program(geometry_program, geometry_detection_runs.get(index, {}), config)
+            )
+        payload["geometry_result"] = geometry_runs[0]
+        payload["batch_geometry_results"] = geometry_runs if is_batch else []
+        if is_batch:
+            for records in payload["batch_records"].values():
+                for record in records:
+                    index = int(record.get("run_index", 1)) - 1
+                    if 0 <= index < len(geometry_runs):
+                        record["geometry_result"] = geometry_runs[index].to_dict()
+
     traceability = job.get("traceability") or {}
     if traceability:
         try:

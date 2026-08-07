@@ -17,7 +17,7 @@ try {
     if ($LASTEXITCODE -ne 0 -or -not $Version) {
         throw "Unable to read the application version."
     }
-    Write-Host "Building Overlay Measure V$Version" -ForegroundColor Cyan
+    Write-Host "Building SOMA Vision Metrology V$Version" -ForegroundColor Cyan
 
     if (-not $SkipTests) {
         & $Python -m pytest -q
@@ -76,7 +76,7 @@ try {
         throw "Inno Setup build failed."
     }
 
-    $Setup = Join-Path $ReleaseDir "OverlayMeasure_Setup_V$Version.exe"
+    $Setup = Join-Path $ReleaseDir "SOMA_Vision_Metrology_V${Version}_Setup.exe"
     if (-not (Test-Path $Setup)) {
         throw "Installer was not found: $Setup"
     }

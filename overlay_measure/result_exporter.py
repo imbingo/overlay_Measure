@@ -11,6 +11,7 @@ from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 
 from .measurement_units import ellipse_metrics_um, mean_pixel_size_um, rotated_rect_size_um, scalar_px_to_um
+from .geometry_models import GeometryRunResult
 from .models import DetectionResult, MeasurementConfig, OverlayResult
 from .quality_profiles import quality_profile_display
 
@@ -251,6 +252,52 @@ def build_detection_failure_row(
     }
 
 
+def build_geometry_rows(result: GeometryRunResult, config: MeasurementConfig, run_index: Optional[int] = None) -> List[dict]:
+    rows: List[dict] = []
+    mean_scale = 0.5 * (config.pixel_size_x_um + config.pixel_size_y_um)
+    for feature in result.features.values():
+        rows.append({
+            "测量次数": run_index,
+            "类别": "要素",
+            "编号": feature.feature_id,
+            "名称": feature.name,
+            "层": _layer_cn(feature.layer),
+            "类型": feature.feature_type,
+            "数值": None if feature.radius_px is None else 2.0 * feature.radius_px * mean_scale,
+            "单位": "μm" if feature.radius_px is not None else "",
+            "中心X(px)": None if feature.center_px is None else feature.center_px[0],
+            "中心Y(px)": None if feature.center_px is None else feature.center_px[1],
+            "状态": "有效" if feature.status == "Valid" else "无效",
+            "质量": feature.quality,
+            "算法路径": feature.algorithm_path,
+            "提示": feature.error,
+        })
+    for coordinate in result.coordinate_systems.values():
+        rows.append({
+            "测量次数": run_index, "类别": "坐标系", "编号": coordinate.coordinate_id,
+            "名称": coordinate.name, "层": _layer_cn(coordinate.layer), "类型": "自定义坐标系",
+            "数值": coordinate.rotation_deg, "单位": "°", "状态": "有效" if coordinate.status == "Valid" else "无效",
+            "质量": "", "算法路径": "物理坐标标定 → 自定义原点与轴", "提示": coordinate.error,
+        })
+    for measurement in result.measurements.values():
+        rows.append({
+            "测量次数": run_index, "类别": "测量", "编号": measurement.measurement_id,
+            "名称": measurement.name, "层": _layer_cn(measurement.layer), "类型": measurement.measurement_type,
+            "数值": measurement.value, "单位": measurement.unit,
+            "状态": "有效" if measurement.status == "Valid" else "无效", "质量": measurement.quality,
+            "算法路径": measurement.algorithm_path, "提示": measurement.error,
+        })
+    for label in result.coordinate_labels.values():
+        rows.append({
+            "测量次数": run_index, "类别": "坐标标注", "编号": label.label_id,
+            "名称": label.name, "层": _layer_cn(label.layer), "类型": "圆心/点坐标",
+            "数值": None, "单位": "μm", "坐标X(μm)": label.x_um, "坐标Y(μm)": label.y_um,
+            "状态": "有效" if label.status == "Valid" else "无效", "质量": "",
+            "算法路径": "要素中心 → 自定义坐标系", "提示": label.error,
+        })
+    return rows
+
+
 def _autosize(ws):
     for col_idx, column_cells in enumerate(ws.columns, 1):
         max_len = 8
@@ -297,15 +344,18 @@ def export_results(
     mark_images: Optional[List[dict]] = None,
     repeatability_rows: Optional[List[dict]] = None,
     traceability_info: Optional[dict] = None,
+    geometry_rows: Optional[List[dict]] = None,
 ) -> None:
     detail_df = pd.DataFrame(rows).rename(columns=DETAIL_COLUMNS)
     summary_df = pd.DataFrame(summary_rows or [])
     repeatability_df = pd.DataFrame(repeatability_rows or [])
+    geometry_df = pd.DataFrame(geometry_rows or [])
     # Keep exported measurement results concise for production review.
     # Internal calculation remains full precision; only output tables are rounded.
     detail_df = detail_df.round(3)
     summary_df = summary_df.round(3)
     repeatability_df = repeatability_df.round(3)
+    geometry_df = geometry_df.round(3)
     ext = Path(path).suffix.lower()
     if ext != ".xlsx":
         # CSV can contain only one table, so export the concise summary when available.
@@ -363,11 +413,15 @@ def export_results(
             if not repeatability_df.empty:
                 repeatability_df.to_excel(writer, index=False, sheet_name="多次测量结果")
             detail_df.to_excel(writer, index=False, sheet_name="识别明细")
+            if not geometry_df.empty:
+                geometry_df.to_excel(writer, index=False, sheet_name="尺寸结果")
 
             sheet_names = ["基础信息", "结果汇总"]
             if not repeatability_df.empty:
                 sheet_names.append("多次测量结果")
             sheet_names.append("识别明细")
+            if not geometry_df.empty:
+                sheet_names.append("尺寸结果")
             for sheet_name in sheet_names:
                 ws = writer.book[sheet_name]
                 _style_sheet(ws, fail_columns=["结果", "判定", "提示"])
