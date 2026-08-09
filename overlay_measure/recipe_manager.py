@@ -65,7 +65,7 @@ def save_recipe(
 ) -> None:
     data = {
         "software_name": "SOMA Vision Metrology",
-        "version": "2.2.0",
+        "version": "2.2.2",
         "roi_fit_policy": "roi_type",
         "measurement_config": asdict(config),
         "detection_params": asdict(params),

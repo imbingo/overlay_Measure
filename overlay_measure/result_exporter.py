@@ -440,10 +440,10 @@ def export_results(
                 _style_sheet(ws, fail_columns=["结果", "判定", "提示"])
 
             if mark_images:
-                ws = writer.book.create_sheet("Mark图片")
+                ws = writer.book.create_sheet("图像工作区")
                 ws["A1"] = "标记"
                 ws["B1"] = "层"
-                ws["C1"] = "ROI截图"
+                ws["C1"] = "完整图像与识别叠加"
                 ws["D1"] = "说明"
                 _style_sheet(ws)
                 for idx, item in enumerate(mark_images, start=2):
@@ -453,7 +453,7 @@ def export_results(
                     image_path = item.get("path")
                     if image_path and Path(image_path).exists():
                         img = XlsxImage(str(image_path))
-                        img.width, img.height = resize_dimensions_preserving_aspect(img.width, img.height, 260.0, 180.0)
+                        img.width, img.height = resize_dimensions_preserving_aspect(img.width, img.height, 720.0, 480.0)
                         ws.add_image(img, f"C{idx}")
                         ws.row_dimensions[idx].height = max(60, img.height * 0.75 + 10)
-                ws.column_dimensions["C"].width = 38
+                ws.column_dimensions["C"].width = 96

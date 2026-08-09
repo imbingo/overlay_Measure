@@ -166,6 +166,9 @@ class ImageCanvas(QLabel):
     roiChanged = Signal(str, str, object)  # mark_id, layer, Roi
     roiSelected = Signal(str, str, str)  # mark_id, layer, stable roi_id
     geometryClicked = Signal(str, object)  # layer, click payload
+    geometryCommand = Signal(str)  # cancel / undo
+    roiSelectionCleared = Signal(str, str)  # mark_id, layer
+    roiContextAction = Signal(str, str, str, str)  # mark_id, layer, roi_id, action
 
     def __init__(self, title: str, fixed_layer: Optional[str] = None, parent=None):
         super().__init__(parent)
@@ -211,6 +214,9 @@ class ImageCanvas(QLabel):
         self.geometry_program = GeometryProgram()
         self.geometry_result = GeometryRunResult()
         self.geometry_interaction_active = False
+        self.geometry_interaction = None
+        self.geometry_hover_point = None
+        self.hovered_geometry_feature_id = ""
         self.selected_geometry_feature_id = ""
         self.selected_caliper_feature = None
         self.selected_caliper_detection_id = None
@@ -281,7 +287,7 @@ class ImageCanvas(QLabel):
         pixel_size_y_um: float = 0.1,
         show_diagnostics: bool = False,
         roi_detections=None,
-        active_roi_id: str = "",
+        active_roi_id: Optional[str] = None,
     ):
         next_layer = self.fixed_layer or active_layer
         next_context = ("auto" if show_auto_detections else "manual", active_mark_id, next_layer)
@@ -291,6 +297,10 @@ class ImageCanvas(QLabel):
         self.active_mark_id = active_mark_id
         self.active_layer = next_layer
         self.active_roi_id = str(active_roi_id or "")
+        if active_roi_id is None:
+            mark = marks.get(active_mark_id)
+            entries = mark.roi_entries(next_layer) if mark is not None else []
+            self.active_roi_id = entries[0].roi_id if entries else ""
         self.active_roi_type = roi_type
         self.active_roi_inner_ratio = float(roi_inner_ratio)
         self.active_roi_target_edge = roi_target_edge
@@ -313,10 +323,6 @@ class ImageCanvas(QLabel):
             self.roi_detections = migrated
         else:
             self.roi_detections = roi_detections
-        if not self.active_roi_id:
-            mark = marks.get(active_mark_id)
-            entries = mark.roi_entries(next_layer) if mark is not None else []
-            self.active_roi_id = entries[0].roi_id if entries else ""
         self.auto_detections = auto_detections or {}
         self.show_auto_detections = bool(show_auto_detections)
         self.manual_labels = manual_labels or {}
@@ -333,10 +339,15 @@ class ImageCanvas(QLabel):
         program: Optional[GeometryProgram],
         result: Optional[GeometryRunResult],
         interaction_active: bool = False,
+        interaction=None,
     ):
         self.geometry_program = program or GeometryProgram()
         self.geometry_result = result or GeometryRunResult()
         self.geometry_interaction_active = bool(interaction_active)
+        self.geometry_interaction = interaction
+        if not interaction_active:
+            self.geometry_hover_point = None
+            self.hovered_geometry_feature_id = ""
         self.update()
 
     def set_geometry_interaction_active(self, active: bool):
@@ -369,6 +380,29 @@ class ImageCanvas(QLabel):
                     distance = float(np.linalg.norm(p - (a + t * segment)))
                     if distance < best_distance:
                         best_id, best_distance = feature_id, distance
+        return best_id
+
+    def _measurement_hit(self, pos, tolerance_px: float = 10.0) -> str:
+        best_id = ""
+        best_distance = float(tolerance_px)
+        point = np.asarray([pos.x(), pos.y()], dtype=float)
+        for measurement_id, measurement in self.geometry_result.measurements.items():
+            if measurement.status != "Valid" or measurement.layer != self.active_layer:
+                continue
+            refs = [self.geometry_result.features.get(item) for item in measurement.reference_ids]
+            refs = [item for item in refs if item is not None and item.center_px is not None]
+            if len(refs) < 2:
+                continue
+            first = np.asarray(self.image_to_widget(*refs[0].center_px), dtype=float)
+            second = np.asarray(self.image_to_widget(*refs[1].center_px), dtype=float)
+            segment = second - first
+            denom = float(np.dot(segment, segment))
+            if denom <= 1e-12:
+                continue
+            t = float(np.clip(np.dot(point - first, segment) / denom, 0.0, 1.0))
+            distance = float(np.linalg.norm(point - (first + t * segment)))
+            if distance < best_distance:
+                best_id, best_distance = measurement_id, distance
         return best_id
 
     def _detection_key_hit(self, pos, tolerance_px: float = 10.0) -> str:
@@ -1103,7 +1137,8 @@ class ImageCanvas(QLabel):
         for feature_id, feature in result.features.items():
             if feature.status != "Valid" or feature.layer != self.active_layer:
                 continue
-            painter.setPen(selected_pen if feature_id == self.selected_geometry_feature_id else feature_pen)
+            highlighted = feature_id in {self.selected_geometry_feature_id, self.hovered_geometry_feature_id}
+            painter.setPen(selected_pen if highlighted else feature_pen)
             if feature.center_px is not None:
                 cx, cy = self.image_to_widget(*feature.center_px)
                 painter.drawLine(int(cx - 6), int(cy), int(cx + 6), int(cy))
@@ -1116,6 +1151,53 @@ class ImageCanvas(QLabel):
                 first = self.image_to_widget(*feature.points_px[0])
                 second = self.image_to_widget(*feature.points_px[1])
                 painter.drawLine(QPointF(*first), QPointF(*second))
+
+        measurement_pen = QPen(QColor("#00C7BE"), 1.6)
+        measurement_pen.setCosmetic(True)
+        for measurement in result.measurements.values():
+            if measurement.status != "Valid" or measurement.layer != self.active_layer:
+                continue
+            refs = [result.features.get(item) for item in measurement.reference_ids]
+            refs = [item for item in refs if item is not None and item.center_px is not None]
+            if not refs:
+                continue
+            painter.setPen(measurement_pen)
+            anchors = [self.image_to_widget(*item.center_px) for item in refs]
+            if len(anchors) >= 2:
+                painter.drawLine(QPointF(*anchors[0]), QPointF(*anchors[1]))
+                tx = (anchors[0][0] + anchors[1][0]) / 2.0
+                ty = (anchors[0][1] + anchors[1][1]) / 2.0
+            else:
+                tx, ty = anchors[0][0] + 12.0, anchors[0][1] - 12.0
+            text = measurement.name
+            if measurement.value is not None:
+                text = f"{measurement.name}: {measurement.value:.3f} {measurement.unit}"
+            bounds = painter.fontMetrics().boundingRect(text).adjusted(-6, -4, 6, 4)
+            bounds.moveCenter(QPoint(int(tx), int(ty - 12)))
+            painter.fillRect(bounds, QColor(18, 21, 26, 210))
+            painter.drawText(bounds, Qt.AlignCenter, text)
+
+        interaction = self.geometry_interaction
+        if interaction and interaction.get("layer") == self.active_layer:
+            preview_pen = QPen(QColor("#FFD60A"), 1.8, Qt.DashLine)
+            preview_pen.setCosmetic(True)
+            painter.setPen(preview_pen)
+            points = [item.get("point_px") for item in interaction.get("clicks", []) if item.get("point_px")]
+            for index, point in enumerate(points, start=1):
+                wx, wy = self.image_to_widget(*point)
+                painter.drawEllipse(QRectF(wx - 4, wy - 4, 8, 8))
+                painter.drawText(int(wx + 6), int(wy - 6), f"P{index}")
+            hover = self.geometry_hover_point
+            if hover is not None and points:
+                action = interaction.get("action", "")
+                if action == "feature:circle" and len(points) >= 2:
+                    circle = self._circle_from_three_points([points[0], points[1], hover])
+                    if circle is not None:
+                        cx, cy, radius = circle
+                        wx, wy = self.image_to_widget(cx, cy)
+                        painter.drawEllipse(QRectF(wx - radius * self.scale, wy - radius * self.scale, 2 * radius * self.scale, 2 * radius * self.scale))
+                else:
+                    painter.drawLine(QPointF(*self.image_to_widget(*points[-1])), QPointF(*self.image_to_widget(*hover)))
 
         axis_pen = QPen(QColor("#00C7BE"), 2.0)
         axis_pen.setCosmetic(True)
@@ -1517,6 +1599,18 @@ class ImageCanvas(QLabel):
                 )
 
     def keyPressEvent(self, event):
+        if event.key() == Qt.Key_Escape and self.geometry_interaction_active:
+            self.geometryCommand.emit("cancel")
+            event.accept()
+            return
+        if event.key() == Qt.Key_Backspace and self.geometry_interaction_active:
+            self.geometryCommand.emit("undo")
+            event.accept()
+            return
+        if event.key() == Qt.Key_Escape and self.active_roi_id:
+            self.roiSelectionCleared.emit(self.active_mark_id, self.active_layer)
+            event.accept()
+            return
         if event.key() == Qt.Key_Escape and self.selected_caliper_feature is not None:
             self.clear_caliper_selection()
             event.accept()
@@ -1542,21 +1636,45 @@ class ImageCanvas(QLabel):
         if self.image is None:
             return
         if event.button() == Qt.RightButton:
-            if self.roi_editing_enabled and not self.circle_pick_mode and not self.show_auto_detections and self._point_in_active_roi_outer(event.position().toPoint()):
+            geometry_id = self._geometry_hit(event.position().toPoint())
+            measurement_id = self._measurement_hit(event.position().toPoint())
+            if geometry_id or measurement_id:
                 menu = QMenu(self)
-                delete_action = menu.addAction("删除当前 ROI")
-                action = menu.exec(event.globalPosition().toPoint())
-                if action == delete_action:
-                    self.roiChanged.emit(self.active_mark_id, self.active_layer, None)
+                delete_action = menu.addAction("删除此测量/几何要素")
+                if menu.exec(event.globalPosition().toPoint()) == delete_action:
+                    self.geometryCommand.emit(f"delete:{measurement_id or geometry_id}")
                 event.accept()
                 return
-            self.is_panning = True
-            self.pan_start_pos = event.position().toPoint()
-            self.pan_start_x = self.pan_x
-            self.pan_start_y = self.pan_y
-            self.setCursor(Qt.ClosedHandCursor)
-            event.accept()
-            return
+            if self.roi_editing_enabled and not self.circle_pick_mode and not self.show_auto_detections:
+                hit_roi_id = self._manual_roi_hit(event.position().toPoint())
+                menu = QMenu(self)
+                if hit_roi_id:
+                    if hit_roi_id != self.active_roi_id:
+                        self.roiSelected.emit(self.active_mark_id, self.active_layer, hit_roi_id)
+                    copy_action = menu.addAction("复制此 ROI")
+                    delete_action = menu.addAction("删除此 ROI")
+                    menu.addSeparator()
+                    clear_selection_action = menu.addAction("取消选择")
+                else:
+                    clear_contours_action = menu.addAction("清除当前层识别轮廓")
+                    delete_layer_action = menu.addAction("删除当前层全部 ROI")
+                    menu.addSeparator()
+                    clear_all_action = menu.addAction("清除所有识别与测量轮廓")
+                action = menu.exec(event.globalPosition().toPoint())
+                if hit_roi_id and action == copy_action:
+                    self.roiContextAction.emit(self.active_mark_id, self.active_layer, hit_roi_id, "copy")
+                elif hit_roi_id and action == delete_action:
+                    self.roiContextAction.emit(self.active_mark_id, self.active_layer, hit_roi_id, "delete")
+                elif hit_roi_id and action == clear_selection_action:
+                    self.roiSelectionCleared.emit(self.active_mark_id, self.active_layer)
+                elif not hit_roi_id and action == clear_contours_action:
+                    self.roiContextAction.emit(self.active_mark_id, self.active_layer, "", "clear_contours")
+                elif not hit_roi_id and action == delete_layer_action:
+                    self.roiContextAction.emit(self.active_mark_id, self.active_layer, "", "delete_layer")
+                elif not hit_roi_id and action == clear_all_action:
+                    self.geometryCommand.emit("clear_all")
+                event.accept()
+                return
         if event.button() == Qt.MiddleButton:
             self.is_panning = True
             self.pan_start_pos = event.position().toPoint()
@@ -1623,8 +1741,9 @@ class ImageCanvas(QLabel):
                 event.accept()
                 return
             hit_roi_id = self._manual_roi_hit(event.position().toPoint())
-            if hit_roi_id and hit_roi_id != self.active_roi_id:
-                self.roiSelected.emit(self.active_mark_id, self.active_layer, hit_roi_id)
+            if hit_roi_id:
+                if hit_roi_id != self.active_roi_id:
+                    self.roiSelected.emit(self.active_mark_id, self.active_layer, hit_roi_id)
                 event.accept()
                 return
             if manual_selected and not self._point_in_active_roi_outer(event.position().toPoint()):
@@ -1655,6 +1774,8 @@ class ImageCanvas(QLabel):
                     return
             p = self.widget_to_image(event.position().toPoint())
             if p is not None:
+                if self.active_roi_id:
+                    self.roiSelectionCleared.emit(self.active_mark_id, self.active_layer)
                 self.drag_start_img = p
                 self.drag_current_img = p
                 self.is_dragging = True
@@ -1673,6 +1794,13 @@ class ImageCanvas(QLabel):
             if p is not None:
                 self.circle_preview_point = p
                 self.update()
+            event.accept()
+            return
+        if self.geometry_interaction_active:
+            self.geometry_hover_point = self.widget_to_image_float(event.position().toPoint())
+            self.hovered_geometry_feature_id = self._geometry_hit(event.position().toPoint())
+            self.setCursor(Qt.PointingHandCursor if self.hovered_geometry_feature_id else Qt.CrossCursor)
+            self.update()
             event.accept()
             return
         if self.is_dragging and self.image is not None:

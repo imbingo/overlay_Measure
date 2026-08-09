@@ -24,12 +24,12 @@ def test_main_window_algorithm_path_status_button_smoke(monkeypatch):
     window.show()
     app.processEvents()
 
-    assert "SOMA Vision Metrology V2.2.0" in window.windowTitle()
+    assert "SOMA Vision Metrology V2.2.2" in window.windowTitle()
     assert not window.windowIcon().isNull()
     assert window.windowFlags() & Qt.FramelessWindowHint
     assert window.title_bar.height() == 46
     assert window.command_bar.objectName() == "commandBar"
-    assert window.version_label.text() == "V2.2.0"
+    assert window.version_label.text() == "V2.2.2"
     assert window.batch_detail_combo.count() == 0
     assert window.batch_detail_bar.isHidden()
     assert window.operation_mode == "Production"

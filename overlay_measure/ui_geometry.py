@@ -4,6 +4,7 @@ from copy import deepcopy
 from typing import Optional
 
 from PySide6.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QDoubleSpinBox,
     QGridLayout,
@@ -108,12 +109,9 @@ class MainWindowGeometryMixin:
 
         edit_row = QHBoxLayout()
         self.geometry_cancel_btn = QPushButton("取消当前操作")
-        self.geometry_delete_btn = QPushButton("删除表格选中项")
-        self.geometry_clear_btn = QPushButton("清除所有轮廓")
-        self.geometry_clear_btn.setObjectName("dangerButton")
+        self.geometry_continuous_check = QCheckBox("连续测量")
         edit_row.addWidget(self.geometry_cancel_btn)
-        edit_row.addWidget(self.geometry_delete_btn)
-        edit_row.addWidget(self.geometry_clear_btn)
+        edit_row.addWidget(self.geometry_continuous_check)
         measurement_layout.addLayout(edit_row)
         measurement_section.add_widget(measurement_group)
         layout.addWidget(measurement_section)
@@ -130,8 +128,6 @@ class MainWindowGeometryMixin:
         self.create_coordinate_btn.clicked.connect(self.start_coordinate_system)
         self.coordinate_label_btn.clicked.connect(self.start_coordinate_label)
         self.geometry_cancel_btn.clicked.connect(self.cancel_geometry_interaction)
-        self.geometry_delete_btn.clicked.connect(self.delete_selected_geometry_item)
-        self.geometry_clear_btn.clicked.connect(self.clear_all_contours)
         return page
 
     def _next_geometry_id(self, prefix: str) -> str:
@@ -147,6 +143,7 @@ class MainWindowGeometryMixin:
             "required": int(count),
             "clicks": [],
             "layer": self._geometry_layer(),
+            "prompt": prompt,
             **extra,
         }
         self.geometry_hint_label.setText(prompt)
@@ -273,6 +270,7 @@ class MainWindowGeometryMixin:
             self.geometry_hint_label.setText("请在开始操作时选择的同一图层完成全部点击。")
             return
         interaction["clicks"].append(dict(click))
+        self._refresh_geometry_canvas_context()
         current = len(interaction["clicks"])
         required = interaction["required"]
         if current < required:
@@ -281,13 +279,52 @@ class MainWindowGeometryMixin:
                 self.geometry_active_tool_label.text().split("（", 1)[0] + f"（已选择 {current}/{required}）"
             )
             return
+        action = interaction["action"]
+        required = interaction["required"]
+        prompt = interaction.get("prompt", self.geometry_hint_label.text())
+        extra = {key: value for key, value in interaction.items() if key not in {"action", "required", "clicks", "layer", "prompt"}}
         try:
             self._finish_geometry_interaction(interaction)
             self._refresh_geometry_results()
         except Exception as exc:
             QMessageBox.warning(self, "轮廓测量", str(exc))
         finally:
+            if getattr(self, "geometry_continuous_check", None) is not None and self.geometry_continuous_check.isChecked():
+                self._set_geometry_interaction(action, required, prompt, **extra)
+            else:
+                self.cancel_geometry_interaction()
+
+    def handle_geometry_command(self, command: str):
+        if command == "clear_all":
+            self.clear_all_contours()
+            return
+        if command.startswith("delete:"):
+            self.delete_geometry_item(command.split(":", 1)[1])
+            return
+        if command == "cancel":
             self.cancel_geometry_interaction()
+            return
+        if command == "undo" and self._geometry_interaction:
+            clicks = self._geometry_interaction.get("clicks", [])
+            if clicks:
+                clicks.pop()
+            current = len(clicks)
+            required = self._geometry_interaction["required"]
+            self.geometry_active_tool_label.setText(
+                self.geometry_active_tool_label.text().split("（", 1)[0] + f"（已选择 {current}/{required}）"
+            )
+            self.geometry_hint_label.setText("已撤销上一个选点，请继续。")
+            self._refresh_geometry_canvas_context()
+
+    def delete_geometry_item(self, identifier: str):
+        identifier = str(identifier or "")
+        if not identifier:
+            return
+        self.geometry_program.features = [item for item in self.geometry_program.features if item.feature_id != identifier]
+        self.geometry_program.measurements = [item for item in self.geometry_program.measurements if item.measurement_id != identifier]
+        self.geometry_program.coordinate_labels = [item for item in self.geometry_program.coordinate_labels if item.label_id != identifier]
+        self.geometry_program.coordinate_systems = [item for item in self.geometry_program.coordinate_systems if item.coordinate_id != identifier]
+        self._refresh_geometry_results()
 
     def _finish_geometry_interaction(self, interaction: dict):
         action = interaction["action"]
@@ -399,7 +436,7 @@ class MainWindowGeometryMixin:
     def _refresh_geometry_canvas_context(self):
         active = bool(self._geometry_interaction)
         for canvas in (self.upper_canvas, self.lower_canvas):
-            canvas.set_geometry_context(self.geometry_program, self.geometry_result, active)
+            canvas.set_geometry_context(self.geometry_program, self.geometry_result, active, self._geometry_interaction)
 
     def _refresh_geometry_table(self):
         headers = ["类型", "编号", "层", "数值", "单位", "状态", "质量", "算法路径", "提示"]

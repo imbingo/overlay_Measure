@@ -1,5 +1,16 @@
 # Changelog
 
+## V2.2.2
+
+- Simplified manual ROI operation around the image canvas: dragging blank image space creates a new ROI, clicking an ROI selects it, and blank click or Esc clears selection.
+- Moved ROI copy/delete and layer-level contour/ROI cleanup into the canvas context menu; removed duplicate add/copy/delete/source/apply/clear controls from the right panel.
+- ROI and algorithm parameter edits now invalidate stale results immediately; the next analysis always uses the currently displayed parameters without a separate Apply step.
+- Improved geometry interaction with selected-point progress, hover highlighting, Backspace undo, Esc cancel, three-point-circle preview, optional continuous measurement and on-canvas dimension labels.
+- Moved geometry/measurement deletion to the image context menu and removed duplicate table-delete and global-clear buttons.
+- Image source labels now include the parent folder and file name.
+- Excel now exports full input-image measurement views for every run/layer, preserving aspect ratio and showing all ROI outlines plus green fitted contours instead of cropped Mark thumbnails.
+- Added V2.2.2 ROI-state, source-display, annotated-export and geometry-interaction regression tests.
+
 ## V2.2.0
 
 - Corrected minimum-enclosing-circle and robust-circle metrology to fit in calibrated physical coordinates, including non-square X/Y pixels; minimum-circle diameter is no longer confused with maximum Feret diameter.

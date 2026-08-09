@@ -19,7 +19,7 @@ from overlay_measure.ui_main import MainWindow
 
 def main() -> int:
     root = ROOT
-    output = root / "artifacts" / "v2.2-ui"
+    output = root / "artifacts" / "v2.2.2-ui"
     output.mkdir(parents=True, exist_ok=True)
 
     app = QApplication.instance() or QApplication(sys.argv)
@@ -57,7 +57,7 @@ def main() -> int:
     for width, height in ((1120, 720), (1366, 768), (1500, 920)):
         window.resize(width, height)
         app.processEvents()
-        target = output / f"v2.2-{width}x{height}.png"
+        target = output / f"v2.2.2-{width}x{height}.png"
         if not window.grab().save(str(target)):
             raise RuntimeError(f"Failed to save {target}")
 

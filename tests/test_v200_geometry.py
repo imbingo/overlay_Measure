@@ -81,7 +81,7 @@ def test_v2_recipe_roundtrip_and_legacy_loader(tmp_path):
     assert loaded_program.features[0].name == "原点"
     data = json.loads(path.read_text(encoding="utf-8"))
     assert data["software_name"] == "SOMA Vision Metrology"
-    assert data["version"] == "2.2.0"
+    assert data["version"] == "2.2.2"
 
 
 def test_v2_ui_brand_tabs_and_measurement_command():
@@ -91,7 +91,8 @@ def test_v2_ui_brand_tabs_and_measurement_command():
     assert window.title_label.text() == "SOMA Vision Metrology"
     assert "See Once, Measure All" in window.brand_subtitle_label.text()
     assert window.side_tabs.count() == 5
-    assert hasattr(window, "geometry_clear_btn")
+    assert hasattr(window, "geometry_continuous_check")
+    assert not hasattr(window, "geometry_clear_btn")
     assert window.result_tabs.tabText(2) == "尺寸结果"
     assert window.analyze_all_btn.text() == "运行测量程序"
     window.close()

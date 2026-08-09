@@ -447,7 +447,7 @@ class MainWindowStateMixin:
             if not entries:
                 return None
             roi_id = self.roi_index_combo.currentData() if hasattr(self, "roi_index_combo") else ""
-            return mark.roi_entry(layer, str(roi_id)) or entries[0]
+            return mark.roi_entry(layer, str(roi_id)) if roi_id else None
 
         def _current_roi(self):
             entry = self._current_roi_entry()
@@ -463,12 +463,12 @@ class MainWindowStateMixin:
             self.roi_index_combo.clear()
             for index, entry in enumerate(entries, start=1):
                 self.roi_index_combo.addItem(f"ROI {index}", entry.roi_id)
-            if entries:
+            if entries and previous:
                 target = self.roi_index_combo.findData(previous)
-                self.roi_index_combo.setCurrentIndex(target if target >= 0 else 0)
+                self.roi_index_combo.setCurrentIndex(target)
+            else:
+                self.roi_index_combo.setCurrentIndex(-1)
             self.roi_index_combo.blockSignals(False)
-            self.copy_roi_btn.setEnabled(bool(entries))
-            self.delete_roi_btn.setEnabled(bool(entries))
 
         def on_roi_index_changed(self, *args):
             self._pending_new_roi = False
@@ -479,6 +479,61 @@ class MainWindowStateMixin:
             self._set_combo_value(self.layer_combo, layer)
             self._refresh_roi_index_combo(roi_id)
             self.on_active_roi_selection_changed()
+
+        def clear_roi_selection(self, mark_id: str = "", layer: str = ""):
+            if mark_id and mark_id != self._current_mark_id():
+                return
+            if layer and layer != self._current_layer():
+                return
+            self._pending_new_roi = False
+            self.roi_index_combo.blockSignals(True)
+            self.roi_index_combo.setCurrentIndex(-1)
+            self.roi_index_combo.blockSignals(False)
+            self.on_active_roi_selection_changed()
+
+        def handle_roi_context_action(self, mark_id: str, layer: str, roi_id: str, action: str):
+            if self.operation_mode != "Engineering":
+                self._append_log("生产模式不允许修改 ROI，请先进入工程模式。")
+                return
+            self.mark_combo.setCurrentText(mark_id)
+            self._set_combo_value(self.layer_combo, layer)
+            if roi_id:
+                self._refresh_roi_index_combo(roi_id)
+            if action == "copy":
+                self.copy_current_roi()
+            elif action == "delete":
+                self.delete_current_roi()
+            elif action == "clear_contours":
+                for entry in self.marks[mark_id].roi_entries(layer):
+                    self._invalidate_manual_roi(mark_id, entry.roi_id, remove_selection=False)
+                self._refresh_all_widgets()
+            elif action == "delete_layer":
+                if QMessageBox.question(self, "删除当前层 ROI", "确定删除当前层全部 ROI 和识别结果吗？") != QMessageBox.Yes:
+                    return
+                self._push_roi_undo()
+                for entry in list(self.marks[mark_id].roi_entries(layer)):
+                    self._invalidate_manual_roi(mark_id, entry.roi_id, remove_selection=True)
+                    self.marks[mark_id].remove_roi(layer, entry.roi_id)
+                self.clear_roi_selection(mark_id, layer)
+                self._refresh_all_widgets()
+
+        def on_roi_parameter_edited(self, *args):
+            if getattr(self, "_syncing_parameter_controls", False):
+                return
+            if self.operation_mode != "Engineering":
+                self._refresh_all_widgets()
+                return
+            if self._current_roi_entry() is None:
+                self._refresh_all_widgets()
+                return
+            self.apply_roi_params_to_current()
+
+        def on_algorithm_parameter_edited(self, *args):
+            if getattr(self, "_syncing_parameter_controls", False):
+                return
+            self._pull_config_from_ui()
+            self.invalidate_measurement_state("算法、标定或规格参数已修改", clear_selections=False)
+            self._refresh_all_widgets()
 
         def begin_add_roi(self):
             if self.operation_mode != "Engineering":
@@ -952,19 +1007,23 @@ class MainWindowStateMixin:
             self._invalidate_manual_roi(mark_id, entry.roi_id)
             # Reflect the just-drawn ROI parameters in the side panel.
             if mark_id == (self.mark_combo.currentText() or "Mark1") and layer == self._current_layer():
-                self._set_combo_value(self.roi_type_combo, getattr(roi, "roi_type", "Annulus"))
-                cx, cy = roi.center()
-                self.center_x_spin.setValue(cx)
-                self.center_y_spin.setValue(cy)
-                self.inner_radius_spin.setValue(roi.inner_radius())
-                self.outer_radius_spin.setValue(roi.outer_radius())
-                self.caliper_count_spin.setValue(int(getattr(roi, "caliper_count", 64)))
-                self.caliper_width_spin.setValue(float(getattr(roi, "caliper_width_px", 8.0)))
-                self._set_combo_value(self.search_direction_combo, getattr(roi, "search_direction", "Inner to Outer"))
-                self._set_combo_value(self.target_edge_combo, getattr(roi, "target_edge", "All Edges"))
-                self._set_combo_value(self.diameter_mode_combo, getattr(roi, "diameter_mode", "Average"))
-                self.inner_ratio_spin.setValue(float(getattr(roi, "inner_ratio", 0.60)))
-                self.roi_angle_spin.setValue(float(getattr(roi, "angle_deg", 0.0)))
+                self._syncing_parameter_controls = True
+                try:
+                    self._set_combo_value(self.roi_type_combo, getattr(roi, "roi_type", "Annulus"))
+                    cx, cy = roi.center()
+                    self.center_x_spin.setValue(cx)
+                    self.center_y_spin.setValue(cy)
+                    self.inner_radius_spin.setValue(roi.inner_radius())
+                    self.outer_radius_spin.setValue(roi.outer_radius())
+                    self.caliper_count_spin.setValue(int(getattr(roi, "caliper_count", 64)))
+                    self.caliper_width_spin.setValue(float(getattr(roi, "caliper_width_px", 8.0)))
+                    self._set_combo_value(self.search_direction_combo, getattr(roi, "search_direction", "Inner to Outer"))
+                    self._set_combo_value(self.target_edge_combo, getattr(roi, "target_edge", "All Edges"))
+                    self._set_combo_value(self.diameter_mode_combo, getattr(roi, "diameter_mode", "Average"))
+                    self.inner_ratio_spin.setValue(float(getattr(roi, "inner_ratio", 0.60)))
+                    self.roi_angle_spin.setValue(float(getattr(roi, "angle_deg", 0.0)))
+                finally:
+                    self._syncing_parameter_controls = False
             self._refresh_all_widgets()
 
         def _refresh_all_widgets(self, *args):
@@ -1006,9 +1065,6 @@ class MainWindowStateMixin:
             roi_search_direction = self._combo_value(self.search_direction_combo) if hasattr(self, "search_direction_combo") else "Inner to Outer"
             roi_diameter_mode = self._combo_value(self.diameter_mode_combo) if hasattr(self, "diameter_mode_combo") else "Average"
             show_auto = self._is_auto_workflow()
-            if hasattr(self, "roi_source_label"):
-                entry = self._current_roi_entry()
-                self.roi_source_label.setText(self._roi_source_text(entry.source if entry else "none"))
             if hasattr(self, "workflow_explanation_label"):
                 self.workflow_explanation_label.setText(
                     "全图自动识别：本次计算不会读取任何 ROI。"
@@ -1104,8 +1160,6 @@ class MainWindowStateMixin:
             self.analyze_all_btn.setEnabled(can_run and not self._calculation_running)
             self.analyze_all_btn.setToolTip(run_reason)
             self.three_point_circle_btn.setEnabled(not show_auto)
-            self.apply_roi_params_btn.setEnabled(not show_auto)
-            self.clear_current_roi_btn.setEnabled(not show_auto)
             self._refresh_mark_combo()
             if hasattr(self, "current_recipe_label"):
                 recipe_display = self.loaded_recipe_display_name or self.recipe_name_edit.text().strip() or "未加载"
@@ -1135,8 +1189,13 @@ class MainWindowStateMixin:
             if hasattr(self, "upper_file_label"):
                 upper_img = self._image_for_layer("upper", current_mark)
                 lower_img = self._image_for_layer("lower", current_mark)
-                self.upper_file_label.setText(Path(upper_img.path).name if upper_img and upper_img.path else "未导入")
-                self.lower_file_label.setText(Path(lower_img.path).name if lower_img and lower_img.path else "未导入")
+                def source_name(image):
+                    if image is None or not image.path:
+                        return "未导入"
+                    path = Path(image.path)
+                    return f"{path.parent.name} / {path.name}" if path.parent.name else path.name
+                self.upper_file_label.setText(source_name(upper_img))
+                self.lower_file_label.setText(source_name(lower_img))
                 if hasattr(self, "image_mode_tip_label"):
                     self.image_mode_tip_label.setText(self.mode_combo.currentText())
             if hasattr(self, "geometry_program"):

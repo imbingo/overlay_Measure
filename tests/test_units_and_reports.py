@@ -129,8 +129,8 @@ def test_export_repeatability_sheet_and_mark_image_aspect_ratio(tmp_path):
 
     wb = load_workbook(out_path)
     assert "多次测量结果" in wb.sheetnames
-    assert len(wb["Mark图片"]._images) == 1
-    assert resize_dimensions_preserving_aspect(400, 100, 260, 180) == (260, 65)
+    assert len(wb["图像工作区"]._images) == 1
+    assert resize_dimensions_preserving_aspect(400, 100, 720, 480) == (400, 100)
     info = {row[0]: row[1] for row in wb["基础信息"].iter_rows(min_row=2, values_only=True)}
     assert info["测量记录编号"] == "M-TEST-001"
     assert info["运行模式"] == "生产模式"

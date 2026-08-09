@@ -54,6 +54,7 @@ from .batch_pairing import validate_batch_pairing
 from .batch_image_store import BatchImageRef, resolve_image
 from .candidate_ordering import assign_spatial_candidate_ids, candidate_display_label, resolve_preferred_candidate
 from .export_naming import build_export_filename
+from .export_visualization import render_measurement_image
 from .image_loader import SUPPORTED_EXTENSIONS, display_to_uint8, load_image
 from .measurement_engine import run_measurement_job
 from .geometry_models import GeometryProgram, GeometryRunResult
@@ -108,44 +109,78 @@ class MainWindowWorkflowMixin:
             return True
 
         def _build_mark_image_exports(self, tmp_dir: str):
-            if self._is_auto_workflow():
-                items = []
-                for mark_id, detected in self.auto_detections_by_mark.items():
-                    for label, layer_map in detected.items():
-                        for layer_key, detection in layer_map.items():
-                            display_label = candidate_display_label(label, detection)
-                            image = self._image_for_layer(layer_key, mark_id)
-                            radius = max(6.0, float(detection.shape_params.get("radius_px", detection.diameter_px / 2.0)))
-                            roi = Roi(
-                                detection.center_x_px - radius,
-                                detection.center_y_px - radius,
-                                radius * 2.0,
-                                radius * 2.0,
-                            )
-                            out_path = Path(tmp_dir) / f"auto_{mark_id}_{display_label}_{layer_key}.png"
-                            if self._crop_roi_image(image, roi, out_path):
-                                items.append({
-                                    "mark_id": f"{mark_id}-{display_label}",
-                                    "layer": LAYER_LABELS.get(layer_key, layer_key),
-                                    "path": str(out_path),
-                                    "note": "自动识别轮廓截图",
-                                })
-                return items
             items = []
-            for mark_id, mark in self.marks.items():
-                layers = [("upper", self._image_for_layer("upper", mark_id), mark.upper_rois)]
-                if self._current_mode() == "Dual Image":
-                    layers.append(("lower", self._image_for_layer("lower", mark_id), mark.lower_rois))
-                for layer, image, entries in layers:
-                    for roi_index, entry in enumerate(entries, start=1):
-                        out_path = Path(tmp_dir) / f"{mark_id}_{layer}_roi_{roi_index}.png"
-                        if self._crop_roi_image(image, entry.roi, out_path):
-                            items.append({
-                                "mark_id": f"{mark_id} ROI {roi_index}",
-                                "layer": LAYER_LABELS.get(layer, layer),
-                                "path": str(out_path),
-                                "note": f"ROI区域截图；稳定ID={entry.roi_id}",
-                            })
+            jobs = []
+            if self._is_batch_mode() and any(self.batch_run_records.values()):
+                for mark_id, records in self.batch_run_records.items():
+                    for record in records:
+                        run_index = int(record.get("run_index", len(jobs) + 1))
+                        detected = record.get("detections", {})
+                        layer_files = (("upper", "upper_file"), ("lower", "lower_file"))
+                        if self._current_mode() != "Dual Image":
+                            layer_files = (("single", "upper_file"),)
+                        for layer, file_key in layer_files:
+                            source = record.get(file_key, "")
+                            if not source:
+                                continue
+                            layer_detections = {}
+                            if record.get("workflow") == "Auto":
+                                for label, layer_map in detected.items():
+                                    if layer == "single":
+                                        for detected_layer, detection in layer_map.items():
+                                            layer_detections[f"{candidate_display_label(label, detection)}-{LAYER_LABELS.get(detected_layer, detected_layer)}"] = detection
+                                    elif layer in layer_map:
+                                        layer_detections[candidate_display_label(label, layer_map[layer])] = layer_map[layer]
+                            else:
+                                layer_detections = {
+                                    key: value for key, value in detected.items()
+                                    if layer == "single" or value.layer == layer
+                                }
+                            try:
+                                image = load_image(source)
+                            except Exception:
+                                continue
+                            jobs.append((mark_id, run_index, layer, image, layer_detections))
+            else:
+                for mark_id, mark in self.marks.items():
+                    export_layers = ("upper", "lower") if self._current_mode() == "Dual Image" else ("single",)
+                    for layer in export_layers:
+                        image_layer = "upper" if layer == "single" else layer
+                        image = self._image_for_layer(image_layer, mark_id)
+                        if image is None:
+                            continue
+                        if self._is_auto_workflow():
+                            detected = {}
+                            for label, layer_map in self.auto_detections_by_mark.get(mark_id, {}).items():
+                                for detected_layer, detection in layer_map.items():
+                                    if layer == "single" or detected_layer == layer:
+                                        detected[f"{candidate_display_label(label, detection)}-{LAYER_LABELS.get(detected_layer, detected_layer)}"] = detection
+                        else:
+                            detected = {
+                                key: value for key, value in self.roi_detections.get(mark_id, {}).items()
+                                if layer == "single" or value.layer == layer
+                            }
+                        jobs.append((mark_id, 1, layer, image, detected))
+            for mark_id, run_index, layer, image, detected in jobs:
+                mark = self.marks.get(mark_id)
+                if mark is not None and not self._is_auto_workflow() and layer == "single":
+                    rois = []
+                    for roi_layer in ("upper", "lower"):
+                        rois.extend(
+                            (f"{LAYER_LABELS.get(roi_layer, roi_layer)} ROI {index}", entry.roi)
+                            for index, entry in enumerate(mark.roi_entries(roi_layer), start=1)
+                        )
+                else:
+                    entries = mark.roi_entries(layer) if mark is not None and not self._is_auto_workflow() else []
+                    rois = [(f"ROI {index}", entry.roi) for index, entry in enumerate(entries, start=1)]
+                out_path = Path(tmp_dir) / f"{mark_id}_run_{run_index}_{layer}.png"
+                if render_measurement_image(image, out_path, rois, detected):
+                    items.append({
+                        "mark_id": f"{mark_id} 第{run_index}次",
+                        "layer": "单图" if layer == "single" else LAYER_LABELS.get(layer, layer),
+                        "path": str(out_path),
+                        "note": f"完整图像与全部 ROI/绿色识别轮廓；来源：{Path(image.path).parent.name} / {Path(image.path).name}",
+                    })
             return items
 
         def _first_upper_image_for_export(self) -> Optional[ImageData]:
@@ -305,9 +340,14 @@ class MainWindowWorkflowMixin:
             mark.reference_size_max_um = max(mark.reference_size_min_um, self.auto_ref_size_max_spin.value())
             mark.target_size_min_um = self.auto_target_size_min_spin.value()
             mark.target_size_max_um = max(mark.target_size_min_um, self.auto_target_size_max_spin.value())
+            self.auto_candidates_by_mark[mark.mark_id] = {}
+            self.auto_detections_by_mark[mark.mark_id] = {}
+            self.auto_selections[mark.mark_id] = {"reference_label": "", "target_label": ""}
             self.auto_overlays.pop(mark.mark_id, None)
+            self.overlays.pop(mark.mark_id, None)
             self._refresh_auto_selection_combos()
             self._refresh_all_widgets()
+            self._append_log("自动识别规则已修改，旧结果已失效，请重新识别。")
 
         def _matches_auto_rule(self, detection: DetectionResult, role: str, mark: MarkRecipe) -> bool:
             shape = detection.shape_params.get("shape_type", "")
