@@ -61,25 +61,20 @@ class MainWindowGeometryMixin:
     def _build_geometry_tab(self) -> QWidget:
         page = QWidget()
         layout = QVBoxLayout(page)
-        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(9)
 
-        intro = QLabel("复用当前图像、ROI、像素标定和识别结果建立几何要素与测量程序。")
-        intro.setWordWrap(True)
-        intro.setObjectName("statusCaption")
-        layout.addWidget(intro)
-
-        feature_section = CollapsibleSection("要素工具", True)
-        feature_group = QGroupBox("要素工具")
+        feature_section = CollapsibleSection("几何工具", True)
+        feature_group = QGroupBox("手工几何工具（不进行亚像素识别）")
         feature_grid = QGridLayout(feature_group)
         feature_specs = [
             ("点", "point"), ("直线", "line"), ("圆", "circle"),
-            ("最小外接圆", "outer_circle_min"), ("稳健外轮廓圆", "outer_circle_robust"),
             ("交点", "intersection"), ("中点", "midpoint"), ("投影点", "projection"),
         ]
         self.geometry_feature_buttons = {}
         for index, (text, action) in enumerate(feature_specs):
             button = QPushButton(text)
+            button.setCheckable(True)
             button.clicked.connect(lambda checked=False, value=action: self.start_geometry_feature(value))
             feature_grid.addWidget(button, index // 2, index % 2)
             self.geometry_feature_buttons[action] = button
@@ -105,6 +100,7 @@ class MainWindowGeometryMixin:
         self.geometry_measurement_buttons = {}
         for index, (text, action) in enumerate(measurement_specs):
             button = QPushButton(text)
+            button.setCheckable(True)
             button.clicked.connect(lambda checked=False, value=action: self.start_geometry_measurement(value))
             grid.addWidget(button, index // 2, index % 2)
             self.geometry_measurement_buttons[action] = button
@@ -113,13 +109,19 @@ class MainWindowGeometryMixin:
         edit_row = QHBoxLayout()
         self.geometry_cancel_btn = QPushButton("取消当前操作")
         self.geometry_delete_btn = QPushButton("删除表格选中项")
+        self.geometry_clear_btn = QPushButton("清除所有轮廓")
+        self.geometry_clear_btn.setObjectName("dangerButton")
         edit_row.addWidget(self.geometry_cancel_btn)
         edit_row.addWidget(self.geometry_delete_btn)
+        edit_row.addWidget(self.geometry_clear_btn)
         measurement_layout.addLayout(edit_row)
         measurement_section.add_widget(measurement_group)
         layout.addWidget(measurement_section)
 
-        self.geometry_hint_label = QLabel("选择工具后按状态栏提示在图像上点击。已创建项目显示在图像和下方“尺寸结果”中。")
+        self.geometry_active_tool_label = QLabel("当前工具：未选择")
+        self.geometry_active_tool_label.setStyleSheet("font-weight: 700; color: #6E6E73;")
+        layout.addWidget(self.geometry_active_tool_label)
+        self.geometry_hint_label = QLabel("ROI 识别结果可直接用于测量；几何工具用于手工点、线、圆及派生点。")
         self.geometry_hint_label.setWordWrap(True)
         self.geometry_hint_label.setObjectName("statusCaption")
         layout.addWidget(self.geometry_hint_label)
@@ -129,6 +131,7 @@ class MainWindowGeometryMixin:
         self.coordinate_label_btn.clicked.connect(self.start_coordinate_label)
         self.geometry_cancel_btn.clicked.connect(self.cancel_geometry_interaction)
         self.geometry_delete_btn.clicked.connect(self.delete_selected_geometry_item)
+        self.geometry_clear_btn.clicked.connect(self.clear_all_contours)
         return page
 
     def _next_geometry_id(self, prefix: str) -> str:
@@ -147,6 +150,14 @@ class MainWindowGeometryMixin:
             **extra,
         }
         self.geometry_hint_label.setText(prompt)
+        label = action.split(":", 1)[-1]
+        display = FEATURE_LABELS.get(label, MEASUREMENT_LABELS.get(label, "坐标工具"))
+        self.geometry_active_tool_label.setText(f"当前工具：{display}（已选择 0/{int(count)}）")
+        self.geometry_active_tool_label.setStyleSheet("font-weight: 700; color: #007AFF;")
+        for key, button in {**self.geometry_feature_buttons, **self.geometry_measurement_buttons}.items():
+            button.blockSignals(True)
+            button.setChecked(key == label)
+            button.blockSignals(False)
         self.progress_stage_label.setText(f"当前阶段：{prompt}")
         for canvas in (self.upper_canvas, self.lower_canvas):
             canvas.set_geometry_interaction_active(True)
@@ -156,6 +167,14 @@ class MainWindowGeometryMixin:
         self._geometry_interaction = None
         if hasattr(self, "geometry_hint_label"):
             self.geometry_hint_label.setText("当前操作已取消。选择工具后可重新建立要素或测量项目。")
+        if hasattr(self, "geometry_active_tool_label"):
+            self.geometry_active_tool_label.setText("当前工具：未选择")
+            self.geometry_active_tool_label.setStyleSheet("font-weight: 700; color: #6E6E73;")
+        for button in [*getattr(self, "geometry_feature_buttons", {}).values(),
+                       *getattr(self, "geometry_measurement_buttons", {}).values()]:
+            button.blockSignals(True)
+            button.setChecked(False)
+            button.blockSignals(False)
         for canvas in (self.upper_canvas, self.lower_canvas):
             canvas.set_geometry_interaction_active(False)
         self._refresh_geometry_canvas_context()
@@ -213,11 +232,23 @@ class MainWindowGeometryMixin:
 
     def _ensure_detection_feature(self, detection_key: str, layer: str) -> str:
         for item in self.geometry_program.features:
-            if item.source == "detection" and item.detection_key == detection_key and item.feature_type == "circle":
+            if item.source == "detection" and item.detection_key == detection_key:
                 return item.feature_id
+        detection = self._current_geometry_detections().get(detection_key)
+        mode = getattr(detection, "fitting_mode", "")
+        if mode == "Line":
+            feature_type = "line"
+        elif mode in {"Rectangle", "ProductionRectangle"}:
+            feature_type = "rectangle"
+        elif mode == "Ellipse":
+            feature_type = "ellipse"
+        elif mode in {"RegionCenter", "EdgeCenter"}:
+            feature_type = "region"
+        else:
+            feature_type = "circle"
         feature_id = self._next_geometry_id("F")
         self.geometry_program.features.append(
-            GeometryFeatureDefinition(feature_id, feature_id, layer, "circle", "detection", detection_key=detection_key)
+            GeometryFeatureDefinition(feature_id, feature_id, layer, feature_type, "detection", detection_key=detection_key)
         )
         return feature_id
 
@@ -246,6 +277,9 @@ class MainWindowGeometryMixin:
         required = interaction["required"]
         if current < required:
             self.geometry_hint_label.setText(f"已选择 {current}/{required}，请继续点击。")
+            self.geometry_active_tool_label.setText(
+                self.geometry_active_tool_label.text().split("（", 1)[0] + f"（已选择 {current}/{required}）"
+            )
             return
         try:
             self._finish_geometry_interaction(interaction)
@@ -324,7 +358,11 @@ class MainWindowGeometryMixin:
 
     def _current_geometry_detections(self):
         if not self._is_auto_workflow():
-            return flatten_detection_map(self.detections)
+            flattened = {}
+            for mark_id, roi_map in self._current_manual_detection_map().items():
+                for roi_id, detection in roi_map.items():
+                    flattened[f"{mark_id}/{roi_id}:{detection.layer}"] = detection
+            return flattened
         flattened = {}
         for mark_id, detected_by_label in self.auto_detections_by_mark.items():
             for label, layer_map in detected_by_label.items():
@@ -406,6 +444,40 @@ class MainWindowGeometryMixin:
         self.geometry_program.coordinate_labels = [item for item in self.geometry_program.coordinate_labels if item.name != name]
         self.geometry_program.coordinate_systems = [item for item in self.geometry_program.coordinate_systems if item.name != name]
         self._refresh_geometry_results()
+
+    def clear_all_contours(self):
+        answer = QMessageBox.question(
+            self,
+            "清除所有轮廓",
+            "将清除全部识别轮廓、几何要素、测量项目和当前结果，但保留已导入图像与 ROI。是否继续？",
+        )
+        if answer != QMessageBox.Yes:
+            return
+        self.cancel_geometry_interaction()
+        self.detections = {}
+        self.roi_detections = {"Mark1": {}, "Mark2": {}}
+        self.auto_detections_by_mark = {"Mark1": {}, "Mark2": {}}
+        self.auto_candidates_by_mark = {"Mark1": {}, "Mark2": {}}
+        self.overlays = {}
+        self.auto_overlays = {}
+        self.batch_overlays = {"Mark1": [], "Mark2": []}
+        self.batch_run_records = {"Mark1": [], "Mark2": []}
+        self.geometry_program = GeometryProgram()
+        self.geometry_result = GeometryRunResult()
+        self.batch_geometry_results = []
+        self.auto_selections = {
+            "Mark1": {"reference_label": "", "target_label": ""},
+            "Mark2": {"reference_label": "", "target_label": ""},
+        }
+        for mark in self.marks.values():
+            mark.reference_contour_id = ""
+            mark.target_contour_id = ""
+        for canvas in (self.upper_canvas, self.lower_canvas):
+            canvas.clear_caliper_selection()
+        self._refresh_auto_selection_combos()
+        self._refresh_geometry_results()
+        self._refresh_all_widgets()
+        self._append_log("已清除所有识别轮廓、几何要素和测量结果；图像与 ROI 已保留。")
 
     def geometry_program_snapshot(self) -> GeometryProgram:
         return deepcopy(self.geometry_program)

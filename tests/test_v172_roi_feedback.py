@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+import time
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -45,12 +46,15 @@ def test_analyze_roi_button_reports_detection_errors(monkeypatch):
     def fail_detection(*args, **kwargs):
         raise ValueError("有效边缘点不足：2 < 60")
 
-    monkeypatch.setattr(window, "_detect_one", fail_detection)
+    monkeypatch.setattr("overlay_measure.measurement_engine.detect_manual_roi", fail_detection)
 
     # Exercise the real QPushButton signal. clicked(False) previously became
     # show_message=False and hid every failure from the operator.
     window.analyze_roi_btn.click()
-    app.processEvents()
+    deadline = time.monotonic() + 5.0
+    while window._preview_thread is not None and time.monotonic() < deadline:
+        app.processEvents()
+        time.sleep(0.01)
 
     assert dialogs
     assert dialogs[0][0] == "ROI 区域分析失败"

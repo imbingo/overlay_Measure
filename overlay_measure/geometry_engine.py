@@ -3,10 +3,8 @@ from __future__ import annotations
 from math import acos, atan2, degrees
 from typing import Dict, Iterable, Optional, Tuple
 
-import cv2
 import numpy as np
 
-from .circle_ellipse_fitter import fit_circle_geometric_robust, fit_circle_least_squares
 from .geometry_models import (
     CoordinateLabelResult,
     CoordinateSystemDefinition,
@@ -19,6 +17,7 @@ from .geometry_models import (
     GeometryRunResult,
 )
 from .models import DetectionResult, MeasurementConfig
+from .measurement_units import mean_pixel_size_um, minimum_enclosing_circle_um, robust_circle_um
 
 
 Point = Tuple[float, float]
@@ -91,11 +90,20 @@ def _feature_line(feature: GeometryFeatureResult) -> list[Point]:
     raise ValueError(f"要素 {feature.name} 不是有效直线")
 
 
-def _detection_feature(definition: GeometryFeatureDefinition, detection: DetectionResult) -> GeometryFeatureResult:
+def _detection_feature(
+    definition: GeometryFeatureDefinition,
+    detection: DetectionResult,
+    config: MeasurementConfig,
+) -> GeometryFeatureResult:
     contour = detection.shape_params.get("contour_points", detection.edge_points)
     points = [_point(value) for value in contour] if contour else []
+    if definition.feature_type == "line":
+        start = detection.shape_params.get("line_start_px")
+        end = detection.shape_params.get("line_end_px")
+        if start is not None and end is not None:
+            points = [_point(start), _point(end)]
     radius = float(detection.shape_params.get("radius_px", detection.diameter_px / 2.0))
-    return GeometryFeatureResult(
+    result = GeometryFeatureResult(
         definition.feature_id,
         definition.name,
         definition.layer,
@@ -108,36 +116,38 @@ def _detection_feature(definition: GeometryFeatureDefinition, detection: Detecti
         str(detection.shape_params.get("quality_grade", "有效")),
         str(detection.shape_params.get("algorithm_path", "识别轮廓复用")),
     )
+    result.radius_um = float(detection.shape_params.get("radius_um", detection.diameter_um / 2.0))
+    return result
 
 
 def _resolve_feature(
     definition: GeometryFeatureDefinition,
     resolved: Dict[str, GeometryFeatureResult],
     detections: Dict[str, DetectionResult],
+    config: MeasurementConfig,
 ) -> GeometryFeatureResult:
     if definition.source == "detection":
         detection = detections.get(definition.detection_key)
         if detection is None:
             raise ValueError(f"找不到识别轮廓：{definition.detection_key}")
-        base = _detection_feature(definition, detection)
-        if definition.feature_type == "circle":
+        base = _detection_feature(definition, detection, config)
+        if definition.feature_type not in {"outer_circle_min", "outer_circle_robust"}:
             return base
         contour = np.asarray(base.points_px, dtype=np.float64)
         if len(contour) < 3:
             raise ValueError("轮廓点不足，无法计算外轮廓圆")
         if definition.feature_type == "outer_circle_min":
-            (cx, cy), radius = cv2.minEnclosingCircle(contour.astype(np.float32))
-            residual = float(np.sqrt(np.mean((np.hypot(contour[:, 0] - cx, contour[:, 1] - cy) - radius) ** 2)))
+            (cx, cy), radius_um, residual_um = minimum_enclosing_circle_um(contour, config)
             path = "识别轮廓 → 凸包 → 最小外接圆"
         elif definition.feature_type == "outer_circle_robust":
-            initial = fit_circle_least_squares(contour)
-            cx, cy, radius, residual = fit_circle_geometric_robust(contour, initial[:3])
+            (cx, cy), radius_um, residual_um = robust_circle_um(contour, config)
             path = "识别轮廓 → 稳健正交距离拟合 → 外轮廓圆"
         else:
             raise ValueError(f"识别轮廓不支持要素类型：{definition.feature_type}")
         base.center_px = (float(cx), float(cy))
-        base.radius_px = float(radius)
-        base.residual_px = float(residual)
+        base.radius_um = float(radius_um)
+        base.radius_px = float(radius_um / mean_pixel_size_um(config))
+        base.residual_px = float(residual_um / mean_pixel_size_um(config))
         base.algorithm_path = path
         return base
 
@@ -292,10 +302,14 @@ def _measurement(
         unit = "°"
         path = "两直线最小夹角"
     elif kind == "diameter":
-        if refs[0].radius_px is None:
+        if refs[0].radius_um is None and refs[0].radius_px is None:
             raise ValueError("所选要素没有直径")
-        value = 2.0 * refs[0].radius_px * 0.5 * (config.pixel_size_x_um + config.pixel_size_y_um)
-        path = "圆半径 → 标定直径"
+        value = 2.0 * (
+            float(refs[0].radius_um)
+            if refs[0].radius_um is not None
+            else float(refs[0].radius_px) * mean_pixel_size_um(config)
+        )
+        path = "物理坐标圆半径 → 标定直径"
     elif kind in {"coordinate_x", "coordinate_y"}:
         coordinate = coordinates[definition.coordinate_id]
         x_value, y_value = coordinate_of_point(_feature_anchor(refs[0]), coordinate, config)
@@ -330,7 +344,7 @@ def execute_geometry_program(
             if any(reference not in result.features for reference in definition.reference_ids):
                 continue
             try:
-                feature = _resolve_feature(definition, result.features, detections)
+                feature = _resolve_feature(definition, result.features, detections, config)
             except Exception as exc:
                 feature = GeometryFeatureResult(
                     definition.feature_id, definition.name, definition.layer,

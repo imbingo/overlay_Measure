@@ -17,6 +17,8 @@ from .quality_profiles import quality_profile_display
 
 
 DETAIL_COLUMNS = {
+    "roi_id": "ROI稳定ID",
+    "roi_label": "ROI编号",
     "timestamp": "测量时间",
     "run_index": "测量次数",
     "measurement_mode": "测量模式",
@@ -151,7 +153,7 @@ def build_detection_rows(
     mean_scale_um = mean_pixel_size_um(config)
     for mark_id, layer_map in detections.items():
         overlay = overlays.get(mark_id)
-        for layer, det in layer_map.items():
+        for detection_key, det in layer_map.items():
             width_px = det.shape_params.get("width_px")
             height_px = det.shape_params.get("height_px")
             angle_deg = float(det.shape_params.get("angle_deg", 0.0))
@@ -172,7 +174,9 @@ def build_detection_rows(
                 "registration_offset_x_um": config.registration_offset_x_um,
                 "registration_offset_y_um": config.registration_offset_y_um,
                 "mark_id": mark_id,
-                "layer": _layer_cn(layer),
+                "roi_id": det.shape_params.get("roi_id", detection_key),
+                "roi_label": det.shape_params.get("roi_label", ""),
+                "layer": _layer_cn(det.layer),
                 "center_x_um": det.center_x_um,
                 "center_y_um": det.center_y_um,
                 "diameter_um": det.diameter_um,
@@ -237,6 +241,12 @@ def build_detection_failure_row(
     upper_file: str,
     lower_file: str,
     error: str,
+    *,
+    layer: str = "",
+    roi_id: str = "",
+    roi_index: Optional[int] = None,
+    roi_label: str = "",
+    status: str = "Error",
 ) -> dict:
     return {
         "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -245,10 +255,13 @@ def build_detection_failure_row(
         "upper_file": upper_file,
         "lower_file": lower_file,
         "mark_id": mark_id,
-        "quality_status": "异常",
+        "roi_id": roi_id,
+        "roi_label": roi_label or (f"ROI {roi_index}" if roi_index else ""),
+        "layer": _layer_cn(layer),
+        "quality_status": "无效" if status == "Invalid" else "异常",
         "failure_reason": error,
         "detection_warning": error,
-        "result": "异常",
+        "result": "无效" if status == "Invalid" else "异常",
     }
 
 

@@ -26,17 +26,18 @@ def _image(name: str = "sample.png") -> ImageData:
 def test_recipe_roi_is_explicit_and_auto_workflow_ignores_it():
     app = QApplication.instance() or QApplication([])
     window = MainWindow()
+    window._set_operation_mode("Engineering", authenticated=True)
     window.mark_images["Mark1"]["upper"] = _image()
     window.marks["Mark1"].upper_roi = Roi(5, 5, 30, 30)
     window.marks["Mark1"].lower_roi = Roi(7, 7, 26, 26)
     window.roi_sources["Mark1"] = {"upper": "recipe", "lower": "recipe"}
 
     window._set_combo_value(window.workflow_combo, "Manual")
-    assert window._recipe_roi_usage() == ["Mark1 上层", "Mark1 下层"]
+    assert window._recipe_roi_usage() == ["Mark1 上层 ROI 1", "Mark1 下层 ROI 1"]
 
     window.set_roi("Mark1", "upper", Roi(10, 10, 20, 20))
     assert window._roi_source("Mark1", "upper") == "manual"
-    assert window._recipe_roi_usage() == ["Mark1 下层"]
+    assert window._recipe_roi_usage() == ["Mark1 下层 ROI 1"]
 
     window._set_combo_value(window.workflow_combo, "Auto")
     assert window._recipe_roi_usage() == []

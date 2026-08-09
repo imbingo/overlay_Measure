@@ -157,9 +157,13 @@ class MainWindowRecipeMixin:
                 }
                 self.roi_sources = self._empty_roi_sources()
                 for mark_id, mark in self.marks.items():
-                    if mark.upper_roi is not None:
+                    for entry in mark.upper_rois:
+                        entry.source = "recipe"
+                    for entry in mark.lower_rois:
+                        entry.source = "recipe"
+                    if mark.upper_rois:
                         self.roi_sources[mark_id]["upper"] = "recipe"
-                    if mark.lower_roi is not None:
+                    if mark.lower_rois:
                         self.roi_sources[mark_id]["lower"] = "recipe"
                 self.loaded_recipe_path = str(Path(path).resolve())
                 self.loaded_recipe_display_name = self.config.recipe_name.strip() or Path(path).stem
@@ -170,16 +174,21 @@ class MainWindowRecipeMixin:
                 for runtime_mark in ("Mark1", "Mark2"):
                     self._ensure_mark_runtime(runtime_mark)
                 self.detections.clear()
+                self.roi_detections = {"Mark1": {}, "Mark2": {}}
                 self.overlays.clear()
                 self.auto_detections_by_mark = {"Mark1": {}, "Mark2": {}}
                 self.auto_candidates_by_mark = {"Mark1": {}, "Mark2": {}}
                 self.auto_selections = {
                     "Mark1": {
-                        "reference_label": getattr(self.config, "auto_reference_label", ""),
-                        "target_label": getattr(self.config, "auto_target_label", ""),
+                        "reference_label": self.marks["Mark1"].reference_contour_id or getattr(self.config, "auto_reference_label", ""),
+                        "target_label": self.marks["Mark1"].target_contour_id or getattr(self.config, "auto_target_label", ""),
                     },
-                    "Mark2": {"reference_label": "", "target_label": ""},
+                    "Mark2": {
+                        "reference_label": self.marks["Mark2"].reference_contour_id,
+                        "target_label": self.marks["Mark2"].target_contour_id,
+                    },
                 }
+                self._manual_selection_requires_review.clear()
                 self.auto_overlays.clear()
                 self.batch_overlays = {"Mark1": [], "Mark2": []}
                 self.batch_run_records = {"Mark1": [], "Mark2": []}
@@ -287,6 +296,10 @@ class MainWindowRecipeMixin:
             if not path:
                 return
             try:
+                for mark_id, mark in self.marks.items():
+                    selection = self.auto_selections.get(mark_id, {})
+                    mark.reference_contour_id = str(selection.get("reference_label", ""))
+                    mark.target_contour_id = str(selection.get("target_label", ""))
                 save_recipe(
                     path,
                     self.config,

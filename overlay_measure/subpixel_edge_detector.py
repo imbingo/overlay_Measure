@@ -160,14 +160,10 @@ def detect_subpixel_edges(gray: np.ndarray, roi: Roi, params: DetectionParams) -
         samples = np.asarray(samples, dtype=np.float32)
         deriv = np.gradient(samples, step)
 
-        if params.polarity == "Dark hole":
-            # dark hole inner boundary usually bright->dark or dark->bright depending side;
-            # use absolute gradient to avoid assuming which side of the contour this point is on.
-            score = np.abs(deriv)
-        elif params.polarity == "Bright hole":
-            score = np.abs(deriv)
-        else:
-            score = np.abs(deriv)
+        # Generic closed-contour extraction has no globally consistent normal
+        # direction, so polarity is intentionally not applied here. Directional
+        # polarity remains available in caliper-circle and line detectors.
+        score = np.abs(deriv)
 
         k = int(np.argmax(score))
         if k <= 0 or k >= len(score) - 1:

@@ -36,7 +36,13 @@ class AccessController:
         if len(password) < 6:
             raise ValueError("工程模式密码至少需要 6 个字符")
         salt = os.urandom(16)
-        data = {"salt": salt.hex(), "digest": self._digest(password, salt), "iterations": 200_000}
+        data = {
+            "salt": salt.hex(),
+            "digest": self._digest(password, salt),
+            "iterations": 200_000,
+            "default_password": password == DEFAULT_ENGINEERING_PASSWORD,
+            "warning_acknowledged": False,
+        }
         temporary = self.settings_path.with_suffix(".tmp")
         temporary.write_text(json.dumps(data, indent=2), encoding="utf-8")
         temporary.replace(self.settings_path)
@@ -49,3 +55,20 @@ class AccessController:
         except (OSError, ValueError, KeyError, TypeError):
             return False
         return hmac.compare_digest(self._digest(password, salt), expected)
+
+    def should_warn_default_password(self) -> bool:
+        try:
+            data = json.loads(self.settings_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError):
+            return False
+        return bool(data.get("default_password", False) and not data.get("warning_acknowledged", False))
+
+    def acknowledge_default_password_warning(self) -> None:
+        try:
+            data = json.loads(self.settings_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError):
+            return
+        data["warning_acknowledged"] = True
+        temporary = self.settings_path.with_suffix(".tmp")
+        temporary.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        temporary.replace(self.settings_path)

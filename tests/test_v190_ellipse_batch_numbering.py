@@ -150,9 +150,15 @@ def test_batch_engine_retains_each_detection_snapshot():
     )
     records = payload["batch_records"]["Mark1"]
     assert [record["run_index"] for record in records] == [1, 2]
-    assert all(set(record["detections"]) == {"upper", "lower"} for record in records)
+    assert all(
+        {detection.layer for detection in record["detections"].values()} == {"upper", "lower"}
+        for record in records
+    )
     assert all(record["selection"] for record in records)
-    assert all(len(record["detections"]["upper"].edge_points) <= 256 for record in records)
+    assert all(
+        all(len(detection.edge_points) <= 256 for detection in record["detections"].values())
+        for record in records
+    )
     assert payload["overlays"]["Mark1"].delta_x_um == pytest.approx(
         records[0]["overlay"].delta_x_um
     )

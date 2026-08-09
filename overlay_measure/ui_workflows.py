@@ -51,6 +51,7 @@ from PySide6.QtWidgets import (
 from .auto_mark_detector import detect_auto_marks_with_report
 from .access_control import AccessController
 from .batch_pairing import validate_batch_pairing
+from .batch_image_store import BatchImageRef, resolve_image
 from .candidate_ordering import assign_spatial_candidate_ids, candidate_display_label, resolve_preferred_candidate
 from .export_naming import build_export_filename
 from .image_loader import SUPPORTED_EXTENSIONS, display_to_uint8, load_image
@@ -86,7 +87,7 @@ from .ui_components import (
     SidebarSpinBox,
 )
 from .ui_recipe_views import RecipeLibraryDialog, RecipeQuickMenu
-from .ui_workers import MeasurementWorker
+from .ui_workers import MeasurementWorker, PreviewWorker
 
 
 class MainWindowWorkflowMixin:
@@ -132,18 +133,19 @@ class MainWindowWorkflowMixin:
                 return items
             items = []
             for mark_id, mark in self.marks.items():
-                layer_pairs = [("upper", "上层", self._image_for_layer("upper", mark_id), mark.upper_roi)]
+                layers = [("upper", self._image_for_layer("upper", mark_id), mark.upper_rois)]
                 if self._current_mode() == "Dual Image":
-                    layer_pairs.append(("lower", "下层", self._image_for_layer("lower", mark_id), mark.lower_roi))
-                for layer_key, layer_label, image, roi in layer_pairs:
-                    out_path = Path(tmp_dir) / f"{mark_id}_{layer_key}.png"
-                    if self._crop_roi_image(image, roi, out_path):
-                        items.append({
-                            "mark_id": mark_id,
-                            "layer": layer_label,
-                            "path": str(out_path),
-                            "note": "ROI区域截图",
-                        })
+                    layers.append(("lower", self._image_for_layer("lower", mark_id), mark.lower_rois))
+                for layer, image, entries in layers:
+                    for roi_index, entry in enumerate(entries, start=1):
+                        out_path = Path(tmp_dir) / f"{mark_id}_{layer}_roi_{roi_index}.png"
+                        if self._crop_roi_image(image, entry.roi, out_path):
+                            items.append({
+                                "mark_id": f"{mark_id} ROI {roi_index}",
+                                "layer": LAYER_LABELS.get(layer, layer),
+                                "path": str(out_path),
+                                "note": f"ROI区域截图；稳定ID={entry.roi_id}",
+                            })
             return items
 
         def _first_upper_image_for_export(self) -> Optional[ImageData]:
@@ -231,11 +233,7 @@ class MainWindowWorkflowMixin:
             return rows
 
         def on_mode_changed(self, *args):
-            for mark_id in ("Mark1", "Mark2"):
-                self.auto_detections_by_mark[mark_id] = {}
-                self.auto_candidates_by_mark[mark_id] = {}
-                self.auto_selections[mark_id] = {"reference_label": "", "target_label": ""}
-            self.auto_overlays.clear()
+            self.invalidate_measurement_state("图像模式已切换")
             self._sync_current_mark_images()
             self._refresh_auto_selection_combos()
             self._refresh_all_widgets()
@@ -263,6 +261,12 @@ class MainWindowWorkflowMixin:
                 "reference_label": self.auto_reference_combo.currentData() or "",
                 "target_label": self.auto_target_combo.currentData() or "",
             }
+            if self.auto_selections[mark_id]["reference_label"] or self.auto_selections[mark_id]["target_label"]:
+                self._manual_selection_requires_review.discard(mark_id)
+            mark = self.marks.get(mark_id)
+            if mark is not None:
+                mark.reference_contour_id = self.auto_selections[mark_id]["reference_label"]
+                mark.target_contour_id = self.auto_selections[mark_id]["target_label"]
             self.auto_overlays.pop(mark_id, None)
             self._refresh_all_widgets()
 
@@ -343,7 +347,10 @@ class MainWindowWorkflowMixin:
                 previous_target = resolve_preferred_candidate(previous_target, current_detections)
                 for label, layer_map in current_detections.items():
                     detection = next(iter(layer_map.values()))
-                    if detection.shape_params.get("quality_status") != "Valid":
+                    if not detection.shape_params.get(
+                        "measurement_eligible",
+                        detection.shape_params.get("quality_status") == "Valid",
+                    ):
                         continue
                     shape = "方" if detection.fitting_mode == "ProductionRectangle" else "圆"
                     size_name = "半尺寸" if detection.fitting_mode in {"AutoRectangle", "ProductionRectangle"} else "半径"
@@ -355,11 +362,8 @@ class MainWindowWorkflowMixin:
                         self.auto_target_combo.addItem(text, label)
             else:
                 layer_map = self._current_manual_detection_map().get(mark_id, {})
-                for layer in ("upper", "lower"):
-                    detection = layer_map.get(layer)
-                    if detection is None:
-                        continue
-                    label = layer
+                for label, detection in layer_map.items():
+                    layer = detection.layer
                     layer_name = LAYER_LABELS.get(layer, layer)
                     fit_name = {
                         "Circle": "圆拟合",
@@ -369,7 +373,8 @@ class MainWindowWorkflowMixin:
                         "RegionCenter": "区域中心",
                         "CaliperCircle": "卡尺圆",
                     }.get(detection.fitting_mode, detection.fitting_mode)
-                    text = (
+                    roi_index = int(detection.shape_params.get("roi_index", 1))
+                    text = f"{layer_name} ROI {roi_index} - " + (
                         f"{mark_id}-{layer_name}轮廓 - {fit_name} - "
                         f"中心=({detection.center_x_um:.3f}, {detection.center_y_um:.3f}) μm"
                     )
@@ -377,123 +382,75 @@ class MainWindowWorkflowMixin:
                     self.auto_target_combo.addItem(text, label)
 
             if self.auto_reference_combo.count() > 0:
-                self._set_combo_value(self.auto_reference_combo, previous_reference)
-                if not self.auto_reference_combo.currentData():
+                reference_index = self.auto_reference_combo.findData(previous_reference) if previous_reference else -1
+                if reference_index >= 0:
+                    self.auto_reference_combo.setCurrentIndex(reference_index)
+                elif previous_reference:
+                    self.auto_reference_combo.setCurrentIndex(-1)
+                elif self._is_auto_workflow():
                     self.auto_reference_combo.setCurrentIndex(0)
+                elif mark_id in self._manual_selection_requires_review:
+                    self.auto_reference_combo.setCurrentIndex(-1)
+                else:
+                    manual_map = self._current_manual_detection_map().get(mark_id, {})
+                    default_id = next(
+                        (roi_id for roi_id, detection in manual_map.items() if detection.layer == "upper"),
+                        self.auto_reference_combo.itemData(0),
+                    )
+                    self.auto_reference_combo.setCurrentIndex(self.auto_reference_combo.findData(default_id))
             if self.auto_target_combo.count() > 0:
-                self._set_combo_value(self.auto_target_combo, previous_target)
-                if self.auto_target_combo.currentData() == self.auto_reference_combo.currentData() and self.auto_target_combo.count() > 1:
-                    self.auto_target_combo.setCurrentIndex(1)
+                target_index = self.auto_target_combo.findData(previous_target) if previous_target else -1
+                if target_index >= 0:
+                    self.auto_target_combo.setCurrentIndex(target_index)
+                elif previous_target:
+                    self.auto_target_combo.setCurrentIndex(-1)
+                elif self._is_auto_workflow():
+                    default_index = 1 if self.auto_target_combo.count() > 1 else -1
+                    self.auto_target_combo.setCurrentIndex(default_index)
+                elif mark_id in self._manual_selection_requires_review:
+                    self.auto_target_combo.setCurrentIndex(-1)
+                else:
+                    manual_map = self._current_manual_detection_map().get(mark_id, {})
+                    reference_id = self.auto_reference_combo.currentData() or ""
+                    default_id = next(
+                        (
+                            roi_id for roi_id, detection in manual_map.items()
+                            if detection.layer == "lower" and roi_id != reference_id
+                        ),
+                        next((roi_id for roi_id in manual_map if roi_id != reference_id), ""),
+                    )
+                    self.auto_target_combo.setCurrentIndex(self.auto_target_combo.findData(default_id))
             self.auto_reference_combo.blockSignals(False)
             self.auto_target_combo.blockSignals(False)
             self.auto_selections[mark_id] = {
                 "reference_label": self.auto_reference_combo.currentData() or "",
                 "target_label": self.auto_target_combo.currentData() or "",
             }
+            mark = self.marks.get(mark_id)
+            if mark is not None:
+                mark.reference_contour_id = self.auto_selections[mark_id]["reference_label"]
+                mark.target_contour_id = self.auto_selections[mark_id]["target_label"]
 
         def auto_identify_marks(self, show_message: bool = True):
             self._pull_config_from_ui()
             mark_id = self._current_mark_id()
-            images = [("upper", self._image_for_layer("upper", mark_id))]
-            if self._current_mode() == "Dual Image":
-                images.append(("lower", self._image_for_layer("lower", mark_id)))
-            if any(image is None for _, image in images):
+            images = {
+                "upper": self._image_for_layer("upper", mark_id),
+                "lower": self._image_for_layer("lower", mark_id),
+            }
+            required = ("upper", "lower") if self._current_mode() == "Dual Image" else ("upper",)
+            if any(images[layer] is None for layer in required):
                 if show_message:
                     QMessageBox.warning(self, "自动识别", "请先导入当前测量模式需要的图像。")
                 return 0
-
-            if hasattr(self, "auto_detect_btn"):
-                self.auto_detect_btn.setEnabled(False)
-            self.statusBar().showMessage("正在自动识别轮廓，请稍候……", 5000)
-            QApplication.setOverrideCursor(Qt.WaitCursor)
-            QApplication.processEvents()
-
-            detected = {}
-            candidates = {}
-            previous_selection = dict(self.auto_selections.get(mark_id, {}))
-            try:
-                results_all = []
-                report_warnings = []
-                for layer, image in images:
-                    try:
-                        report = detect_auto_marks_with_report(
-                            image.gray,
-                            layer,
-                            self.params,
-                            self.config.pixel_size_x_um,
-                            self.config.pixel_size_y_um,
-                        )
-                        results = report.results
-                        warning_text = report.warning_text()
-                        if warning_text:
-                            report_warnings.append(f"{LAYER_LABELS.get(layer, layer)}：{warning_text}")
-                    except Exception as exc:
-                        self._append_log(f"自动识别 {mark_id} {LAYER_LABELS.get(layer, layer)} 失败：{self._friendly_error(exc)}")
-                        results = []
-                    results_all.extend(results)
-                    QApplication.processEvents()
-
-                results_all.sort(key=lambda result: -result.diameter_px)
-                # Avoid UI stalls on noisy images by refining only the largest/relevant candidates.
-                max_candidates = 32
-                results_all = results_all[:max_candidates]
-                spatial_entries = assign_spatial_candidate_ids(results_all, self._current_mode() == "Dual Image")
-                for label_index, (label, result) in enumerate(spatial_entries):
-                    result.mark_id = f"{mark_id}-{label}"
-                    candidates[label] = {result.layer: result}
-                    image = self._image_for_layer(result.layer, mark_id)
-                    try:
-                        measured = refine_candidate(image.gray, result, self.params, self.config)
-                    except Exception as exc:
-                        measured = result
-                        measured.shape_params["quality_hard_failure"] = True
-                        measured.shape_params["failure_reason"] = f"精测失败：{self._friendly_error(exc)}"
-                        measured.warning = measured.shape_params["failure_reason"]
-                        measured = attach_algorithm_path(measured, "Auto")
-                    if not (self.params.diameter_min_um <= measured.diameter_um <= self.params.diameter_max_um):
-                        measured.shape_params["quality_hard_failure"] = True
-                        measured.shape_params["failure_reason"] = "尺寸超出配方范围"
-                        measured.warning = "尺寸超出配方范围"
-                    annotate_detection_quality(measured, self.config)
-                    detected[label] = {result.layer: measured}
-                    QApplication.processEvents()
-
-                self.auto_candidates_by_mark[mark_id] = candidates
-                self.auto_detections_by_mark[mark_id] = detected
-                self.auto_overlays.pop(mark_id, None)
-                self.auto_selections[mark_id] = previous_selection
-                self._refresh_auto_selection_combos()
-                self._refresh_all_widgets()
-                if report_warnings:
-                    self._append_log("；".join(report_warnings))
-                if show_message:
-                    if detected:
-                        valid_count = sum(
-                            next(iter(layer_map.values())).shape_params.get("quality_status") == "Valid"
-                            for layer_map in detected.values()
-                        )
-                        message = f"共发现 {len(detected)} 个候选，精测有效 {valid_count} 个。"
-                        if report_warnings:
-                            message += "\n\n提示：\n" + "\n".join(report_warnings)
-                        QMessageBox.information(self, "自动精测完成", message)
-                    else:
-                        message = "未找到可用的闭合 Mark 轮廓，请检查对比度、焦面、ROI/算法参数或改用手动 ROI。"
-                        if report_warnings:
-                            message += "\n\n提示：\n" + "\n".join(report_warnings)
-                        QMessageBox.warning(self, "自动识别", message)
-                status_message = f"自动识别完成：{len(detected)} 个候选"
-                if report_warnings:
-                    status_message += "；存在截断提示"
-                self.statusBar().showMessage(status_message, 5000)
-                return len(detected)
-            finally:
-                QApplication.restoreOverrideCursor()
-                if hasattr(self, "auto_detect_btn"):
-                    self.auto_detect_btn.setEnabled(True)
+            return self._start_preview_job("auto", mark_id, images, show_message)
 
         def _find_manual_detection(self, mark_id: str, label: str) -> Optional[DetectionResult]:
+            detections = self._current_manual_detection_map().get(mark_id, {})
+            if label in detections:
+                return detections[label]
             if label in {"upper", "lower"}:
-                return self._current_manual_detection_map().get(mark_id, {}).get(label)
+                return next((item for item in detections.values() if item.layer == label), None)
             return None
 
         def calculate_auto_overlay(self, show_message: bool = True):
@@ -541,6 +498,10 @@ class MainWindowWorkflowMixin:
                 reference_name, target_name = reference_label, target_label
             name = f"{mark_id}: {target_name} 相对 {reference_name}"
             overlay = calculate_relative_overlay(mark_id, reference, target, self.config)
+            overlay.reference_contour_id = reference_label
+            overlay.target_contour_id = target_label
+            overlay.reference_contour_name = reference_name
+            overlay.target_contour_name = target_name
             if self.config.recipe_validation_status != "Validated":
                 overlay.result = "Trial"
                 overlay.warning = "试测/未验证配方，不作正式判定"
@@ -608,7 +569,7 @@ class MainWindowWorkflowMixin:
             }
             return len(folders)
 
-        def _append_batch_image_data(self, mark_id: str, layer: str, images: list[ImageData]) -> tuple[int, int]:
+        def _append_batch_image_data(self, mark_id: str, layer: str, images: list) -> tuple[int, int]:
             self._ensure_mark_runtime(mark_id)
             target = self.batch_images.setdefault(mark_id, {}).setdefault(layer, [])
             known_paths = {self._batch_image_path_key(image) for image in target}
@@ -626,7 +587,7 @@ class MainWindowWorkflowMixin:
             if added:
                 self.batch_run_records[mark_id] = []
                 self.batch_overlays[mark_id] = []
-                self._set_image_for_layer(mark_id, layer, target[0], "batch_preview")
+                self._set_image_for_layer(mark_id, layer, resolve_image(target[0]), "batch_preview")
                 self._invalidate_image_dependent_results(mark_id, layer)
             return added, duplicates
 
@@ -650,7 +611,7 @@ class MainWindowWorkflowMixin:
                 self._append_log(f"取消{title}。")
                 return
             try:
-                images = [load_image(path) for path in paths]
+                images = [BatchImageRef.from_path(path) for path in paths]
                 added, duplicates = self._append_batch_image_data(mark_id, layer, images)
                 self._set_combo_value(self.measurement_run_mode_combo, "Batch")
                 self._sync_current_mark_images()
@@ -661,6 +622,9 @@ class MainWindowWorkflowMixin:
                 message = f"{title}完成：新增 {added} 张，当前共 {total} 张，来自 {folder_count} 个文件夹"
                 if duplicates:
                     message += f"；已跳过 {duplicates} 张重复文件"
+                total_bytes = sum(getattr(item, "size_bytes", 0) for item in self.batch_images[mark_id][layer])
+                if total >= 1000 or total_bytes >= 500 * 1024 * 1024:
+                    message += f"；数据量较大（{total} 张，{total_bytes / 1024**2:.1f} MB），测量将按文件逐张加载"
                 self._append_log(message + "。")
             except Exception as exc:
                 self._append_log(f"{title}失败：{exc}")
@@ -867,6 +831,9 @@ class MainWindowWorkflowMixin:
             }
             self.mark_image_sources = self._empty_image_sources()
             self.detections.clear()
+            self.roi_detections = {"Mark1": {}, "Mark2": {}}
+            self.roi_detection_failures = {"Mark1": [], "Mark2": []}
+            self._pending_new_roi = False
             self.overlays.clear()
             self.auto_detections_by_mark = {"Mark1": {}, "Mark2": {}}
             self.auto_candidates_by_mark = {"Mark1": {}, "Mark2": {}}
@@ -874,6 +841,7 @@ class MainWindowWorkflowMixin:
                 "Mark1": {"reference_label": "", "target_label": ""},
                 "Mark2": {"reference_label": "", "target_label": ""},
             }
+            self._manual_selection_requires_review.clear()
             self.auto_overlays.clear()
             self.batch_images = {"Mark1": {"upper": [], "lower": []}, "Mark2": {"upper": [], "lower": []}}
             self.batch_overlays = {"Mark1": [], "Mark2": []}
@@ -908,28 +876,46 @@ class MainWindowWorkflowMixin:
             self._refresh_all_widgets()
 
         def set_roi(self, mark_id: str, layer: str, roi: Roi, source: str = "manual"):
+            if self.operation_mode != "Engineering":
+                self._append_log("生产模式不允许修改 ROI，请先进入工程模式。")
+                return
             if hasattr(self, "three_point_circle_btn") and self.three_point_circle_btn.isChecked():
                 self.three_point_circle_btn.blockSignals(True)
                 self.three_point_circle_btn.setChecked(False)
                 self.three_point_circle_btn.blockSignals(False)
             if mark_id not in {"Mark1", "Mark2"}:
                 return
+            self._push_roi_undo()
             if mark_id not in self.marks:
                 self.marks[mark_id] = MarkRecipe(mark_id)
             mark = self.marks[mark_id]
             if roi is not None:
                 roi = self._coerce_roi_to_auto_ring(roi, layer)
-            if layer == "upper":
-                mark.upper_roi = roi
+            current_entry = (
+                self._current_roi_entry()
+                if mark_id == self._current_mark_id() and layer == self._current_layer()
+                else None
+            )
+            if roi is None:
+                if current_entry is not None:
+                    mark.remove_roi(layer, current_entry.roi_id)
+                    self._invalidate_manual_roi(mark_id, current_entry.roi_id, remove_selection=True)
+                self._pending_new_roi = False
+                self._refresh_roi_index_combo()
+                self._refresh_all_widgets()
+                return
+            if self._pending_new_roi or current_entry is None:
+                current_entry = mark.add_roi(layer, roi, source)
+                self._pending_new_roi = False
+                self._refresh_roi_index_combo(current_entry.roi_id)
+                self.upper_canvas.setCursor(Qt.ArrowCursor)
+                self.lower_canvas.setCursor(Qt.ArrowCursor)
             else:
-                mark.lower_roi = roi
+                current_entry.roi = roi
+                current_entry.source = source
             self.roi_sources.setdefault(mark_id, {})[layer] = source if roi is not None else "none"
             self._recipe_roi_confirmation_signature = None
-            # Clear outdated detection for that layer.
-            if mark_id in self.detections and layer in self.detections[mark_id]:
-                del self.detections[mark_id][layer]
-            if mark_id in self.overlays:
-                del self.overlays[mark_id]
+            self._invalidate_manual_roi(mark_id, current_entry.roi_id)
             if roi is not None and mark_id == (self.mark_combo.currentText() or "Mark1") and layer == self._current_layer():
                 widgets = (
                     self.roi_type_combo,
@@ -967,7 +953,12 @@ class MainWindowWorkflowMixin:
         def clear_current_roi(self):
             mark_id = self._current_mark_id()
             layer = self._current_layer()
-            self.set_roi(mark_id, layer, None)
+            entry = self._current_roi_entry()
+            if entry is not None:
+                self.marks[mark_id].remove_roi(layer, entry.roi_id)
+                self._invalidate_manual_roi(mark_id, entry.roi_id, remove_selection=True)
+                self._refresh_roi_index_combo()
+                self._refresh_all_widgets()
             self._append_log(f"已清除 {mark_id} {LAYER_LABELS.get(layer, layer)} ROI。")
 
         def clear_all_recipe_rois(self):
@@ -977,18 +968,25 @@ class MainWindowWorkflowMixin:
                 if mark is None:
                     continue
                 for layer in ("upper", "lower"):
-                    if self._roi_source(mark_id, layer) != "recipe":
-                        continue
+                    retained = []
+                    for entry_index, entry in enumerate(mark.roi_entries(layer)):
+                        legacy_source = self.roi_sources.get(mark_id, {}).get(layer, "none")
+                        is_recipe_entry = entry.source == "recipe" or (
+                            entry_index == 0 and legacy_source == "recipe"
+                        )
+                        if is_recipe_entry:
+                            self._invalidate_manual_roi(mark_id, entry.roi_id, remove_selection=True)
+                            cleared.append(f"{mark_id}-{LAYER_LABELS.get(layer, layer)}-{entry.roi_id}")
+                        else:
+                            retained.append(entry)
                     if layer == "upper":
-                        mark.upper_roi = None
+                        mark.upper_rois = retained
                     else:
-                        mark.lower_roi = None
-                    self.roi_sources.setdefault(mark_id, {})[layer] = "none"
-                    cleared.append(f"{mark_id}-{LAYER_LABELS.get(layer, layer)}")
+                        mark.lower_rois = retained
+                    if not retained:
+                        self.roi_sources.setdefault(mark_id, {})[layer] = "none"
             self._recipe_roi_confirmation_signature = None
             if cleared:
-                self.detections.clear()
-                self.overlays.clear()
                 self._append_log("已清除配方 ROI：" + "、".join(cleared))
             else:
                 self._append_log("当前没有配方来源的 ROI。")
@@ -1001,121 +999,152 @@ class MainWindowWorkflowMixin:
                 return self._active_image_for_layer(mark_id, "upper")
             return self._active_image_for_layer(mark_id, layer)
 
-        def _detect_one(self, mark: MarkRecipe, layer: str) -> DetectionResult:
+        def _detect_one(self, mark: MarkRecipe, layer: str, roi_entry=None) -> DetectionResult:
             self._pull_config_from_ui()
             img = self._image_for_layer(layer, mark.mark_id)
             if img is None:
                 raise ValueError(f"{LAYER_LABELS[layer]} 图像未导入")
-            roi = mark.upper_roi if layer == "upper" else mark.lower_roi
+            entries = mark.roi_entries(layer)
+            roi_entry = roi_entry or (entries[0] if entries else None)
+            roi = roi_entry.roi if roi_entry is not None else None
             if roi is None:
                 raise ValueError(f"{mark.mark_id} {LAYER_LABELS[layer]} ROI 未设置")
             roi = self._coerce_roi_to_auto_ring(roi, layer)
-            return detect_manual_roi(mark.mark_id, layer, img, roi, self.params, self.config)
+            detection = detect_manual_roi(mark.mark_id, layer, img, roi, self.params, self.config)
+            roi_index = entries.index(roi_entry) + 1
+            detection.shape_params["roi_id"] = roi_entry.roi_id
+            detection.shape_params["roi_index"] = roi_index
+            detection.shape_params["roi_label"] = f"{LAYER_LABELS.get(layer, layer)} ROI {roi_index}"
+            return detection
 
         def analyze_current_mark(self):
             mark_id = self.mark_combo.currentText()
             if not mark_id:
                 return
-            self._analyze_mark(mark_id)
+            return self.analyze_roi_regions(show_message=True)
 
         def analyze_current_roi(self):
             # Backward-compatible entry. V1.2.5 uses batch ROI-region analysis.
             return self.analyze_roi_regions()
 
         def analyze_roi_regions(self, show_message: bool = True):
-            """Analyze every ROI region already set for the current Mark.
-
-            Manual ROI measurement should not require switching between upper/lower layers and
-            clicking analyze repeatedly. This method detects all available ROI regions for the
-            current Mark, refreshes reference/target selectors, and leaves overlay calculation
-            to the single top toolbar button.
-            """
             mark_id = self.mark_combo.currentText() or self._current_mark_id()
-            if not mark_id:
-                if show_message:
-                    QMessageBox.warning(self, "分析 ROI 区域", "当前没有可分析的 Mark。")
-                return 0
             mark = self.marks[mark_id]
-            layers_to_analyze = []
+            images = {}
+            roi_count = 0
             for layer in ("upper", "lower"):
-                roi = mark.upper_roi if layer == "upper" else mark.lower_roi
-                image = self._image_for_layer(layer, mark_id)
-                if roi is not None and image is not None:
-                    layers_to_analyze.append(layer)
-            if not layers_to_analyze:
+                images[layer] = self._image_for_layer(layer, mark_id)
+                if images[layer] is not None:
+                    roi_count += len(mark.roi_entries(layer))
+            if not roi_count:
                 if show_message:
                     QMessageBox.warning(self, "分析 ROI 区域", "当前 Mark 没有可分析的 ROI 区域。请先导入图像并框选 ROI。")
                 self._append_log(f"{mark_id} 分析 ROI 未开始：缺少图像或 ROI。")
                 return 0
+            self._pull_config_from_ui()
+            return self._start_preview_job("manual", mark_id, images, show_message)
 
-            analyzed = []
-            errors = []
-            original_button_text = self.analyze_roi_btn.text()
-            self.analyze_roi_btn.setText("正在分析…")
-            self.analyze_roi_btn.setEnabled(False)
-            self.progress_stage_label.setText(f"当前阶段：正在分析 {mark_id} ROI")
-            self._append_log(f"已开始分析 {mark_id} ROI。")
-            QApplication.processEvents()
-            try:
-                self._pull_config_from_ui()
-                for layer in layers_to_analyze:
-                    try:
-                        self.progress_stage_label.setText(
-                            f"当前阶段：正在分析 {mark_id} {LAYER_LABELS.get(layer, layer)} ROI"
-                        )
-                        QApplication.processEvents()
-                        det = self._detect_one(mark, layer)
-                        self.detections.setdefault(mark_id, {})[layer] = det
-                        analyzed.append((layer, det))
-                    except Exception as exc:
-                        self.runtime_logger.exception(
-                            "ROI analysis failed: mark=%s layer=%s", mark_id, layer
-                        )
-                        errors.append(f"{LAYER_LABELS.get(layer, layer)}：{self._friendly_error(exc)}")
-            except Exception as exc:
-                self.runtime_logger.exception("ROI analysis setup failed: mark=%s", mark_id)
-                errors.append(f"分析准备失败：{self._friendly_error(exc)}")
-            finally:
-                self.analyze_roi_btn.setText(original_button_text)
-                self.analyze_roi_btn.setEnabled(True)
+        def _start_preview_job(self, kind: str, mark_id: str, images: dict, show_message: bool):
+            if self._calculation_running or self._preview_thread is not None:
+                self._append_log("已有分析任务正在运行。")
+                return 0
+            job = {
+                "kind": kind,
+                "mark_id": mark_id,
+                "config": deepcopy(self.config),
+                "params": deepcopy(self.params),
+                "mark": deepcopy(self.marks[mark_id]),
+                "images": dict(images),
+                "selection": self._selection_snapshot(mark_id),
+            }
+            self._preview_show_message = bool(show_message)
+            self._preview_final_stage = ""
+            self._set_calculation_running(True)
+            self.progress_stage_label.setText("当前阶段：正在准备预览分析")
+            thread = QThread(self)
+            worker = PreviewWorker(job)
+            worker.moveToThread(thread)
+            thread.started.connect(worker.run)
+            worker.progress.connect(self._on_calculation_progress, Qt.QueuedConnection)
+            worker.finished.connect(self._on_preview_completed, Qt.QueuedConnection)
+            worker.failed.connect(self._on_preview_failed, Qt.QueuedConnection)
+            worker.cancelled.connect(self._on_preview_cancelled, Qt.QueuedConnection)
+            for signal in (worker.finished, worker.failed, worker.cancelled):
+                signal.connect(thread.quit)
+                signal.connect(worker.deleteLater)
+            thread.finished.connect(thread.deleteLater)
+            thread.finished.connect(self._on_preview_thread_finished, Qt.QueuedConnection)
+            self._preview_thread = thread
+            self._preview_worker = worker
+            thread.start()
+            return 1
 
-            if mark_id in self.overlays:
-                del self.overlays[mark_id]
+        def _on_preview_completed(self, payload: dict):
+            mark_id = payload["mark_id"]
+            measured = payload["measured"]
+            if payload["kind"] == "auto":
+                self.auto_candidates_by_mark[mark_id] = measured["candidates"]
+                self.auto_detections_by_mark[mark_id] = measured["detections"]
+                self.auto_selections[mark_id] = measured["selection"]
+                self.auto_overlays.pop(mark_id, None)
+                warnings = measured.get("warnings", [])
+                valid_count = sum(
+                    next(iter(layer_map.values())).shape_params.get("measurement_eligible", False)
+                    for layer_map in measured["detections"].values()
+                )
+                self._append_log(
+                    f"自动识别完成：{len(measured['detections'])} 个候选，{valid_count} 个可用于测量。"
+                )
+                if warnings:
+                    self._append_log("；".join(warnings))
+                self._preview_final_stage = f"当前阶段：{mark_id} 自动识别完成"
+            else:
+                self.roi_detections[mark_id] = measured["detections"]
+                self._rebuild_legacy_manual_detections(mark_id)
+                self.auto_selections[mark_id] = measured["selection"]
+                self.overlays.pop(mark_id, None)
+                failures = measured.get("failures", [])
+                self.roi_detection_failures[mark_id] = failures
+                if failures and self._preview_show_message:
+                    dialog = QMessageBox.warning if measured["detections"] else QMessageBox.critical
+                    dialog(
+                        self,
+                        "ROI 区域部分完成" if measured["detections"] else "ROI 区域分析失败",
+                        "\n".join(
+                            f"{LAYER_LABELS.get(item['layer'], item['layer'])} {item['roi_label']}："
+                            f"{self._friendly_error(Exception(item['error']))}"
+                            for item in failures
+                        ),
+                    )
+                self._append_log(
+                    f"{mark_id} ROI 分析完成：{len(measured['detections'])} 个成功，{len(failures)} 个失败。"
+                )
+                self._preview_final_stage = (
+                    f"当前阶段：{mark_id} ROI 分析失败"
+                    if not measured["detections"]
+                    else f"当前阶段：{mark_id} ROI 部分完成" if failures
+                    else f"当前阶段：{mark_id} ROI 分析完成"
+                )
             self._refresh_auto_selection_combos()
             self._refresh_all_widgets()
 
-            if show_message:
-                if analyzed:
-                    lines = []
-                    for layer, det in analyzed:
-                        radius_px = det.shape_params.get("radius_px")
-                        if radius_px is not None:
-                            detail = f"半径={det.diameter_um / 2.0:.3f} μm"
-                        else:
-                            detail = f"尺寸={det.diameter_um:.3f} μm"
-                        lines.append(f"{mark_id} {LAYER_LABELS.get(layer, layer)}：中心=({det.center_x_um:.3f}, {det.center_y_um:.3f}) μm，{detail}")
-                    if errors:
-                        lines.append("\n以下 ROI 未完成：")
-                        lines.extend(errors)
-                        QMessageBox.warning(self, "ROI 区域部分完成", "\n".join(lines))
-                    else:
-                        QMessageBox.information(self, "ROI 区域分析完成", "\n".join(lines))
-                else:
-                    QMessageBox.critical(
-                        self,
-                        "ROI 区域分析失败",
-                        "没有生成任何识别结果。\n\n" + "\n\n".join(errors),
-                    )
-            if analyzed and not errors:
-                self.progress_stage_label.setText(f"当前阶段：{mark_id} ROI 分析完成")
-                self._append_log(f"{mark_id} ROI 分析完成，共完成 {len(analyzed)} 个区域。")
-            elif analyzed:
-                self.progress_stage_label.setText(f"当前阶段：{mark_id} ROI 部分完成")
-                self._append_log(f"{mark_id} ROI 部分完成：{len(analyzed)} 个成功，{len(errors)} 个失败。")
-            else:
-                self.progress_stage_label.setText(f"当前阶段：{mark_id} ROI 分析失败")
-                self._append_log(f"{mark_id} ROI 分析失败，请查看错误提示。")
-            return len(analyzed)
+        def _on_preview_failed(self, message: str):
+            self.runtime_logger.error("Preview analysis failed: %s", message)
+            self._preview_final_stage = "当前阶段：ROI 分析失败"
+            QMessageBox.critical(self, "分析失败", self._friendly_error(Exception(message)))
+
+        def _on_preview_cancelled(self):
+            self._preview_final_stage = "当前阶段：预览分析已取消"
+            self._append_log("预览分析已取消。")
+
+        def _on_preview_thread_finished(self):
+            self._preview_worker = None
+            self._preview_thread = None
+            self._set_calculation_running(False)
+            self._refresh_all_widgets()
+            if getattr(self, "_preview_final_stage", ""):
+                self.progress_stage_label.setText(self._preview_final_stage)
+                self._preview_final_stage = ""
 
         def _recipe_roi_usage(self) -> list[str]:
             if self._is_auto_workflow():
@@ -1130,9 +1159,13 @@ class MainWindowWorkflowMixin:
                 if not has_upper:
                     continue
                 for layer in ("upper", "lower"):
-                    roi = getattr(self.marks.get(mark_id), f"{layer}_roi", None)
-                    if roi is not None and self._roi_source(mark_id, layer) == "recipe":
-                        usage.append(f"{mark_id} {LAYER_LABELS.get(layer, layer)}")
+                    mark = self.marks.get(mark_id)
+                    if mark is None:
+                        continue
+                    for roi_index, entry in enumerate(mark.roi_entries(layer), start=1):
+                        legacy_source = self.roi_sources.get(mark_id, {}).get(layer, "none")
+                        if entry.source == "recipe" or (roi_index == 1 and legacy_source == "recipe"):
+                            usage.append(f"{mark_id} {LAYER_LABELS.get(layer, layer)} ROI {roi_index}")
             return usage
 
         def _confirm_recipe_rois(self) -> bool:
@@ -1167,7 +1200,10 @@ class MainWindowWorkflowMixin:
                     mark_id: {layer: list(self.batch_images[mark_id][layer]) for layer in ("upper", "lower")}
                     for mark_id in ("Mark1", "Mark2")
                 },
-                "selections": deepcopy(self.auto_selections),
+                "selections": {
+                    mark_id: self._selection_snapshot(mark_id)
+                    for mark_id in self.marks
+                },
                 "batch": self._is_batch_mode(),
                 "roi_sources": deepcopy(self.roi_sources),
                 "geometry_program": self.geometry_program_snapshot(),
@@ -1177,6 +1213,16 @@ class MainWindowWorkflowMixin:
                     "input_paths": self._all_input_paths(),
                     "operation_mode": self.operation_mode,
                 },
+            }
+
+        def _selection_snapshot(self, mark_id: str) -> dict:
+            """Return the recipe-owned contour selection used by measurement jobs."""
+            mark = self.marks.get(mark_id)
+            if mark is None:
+                return {"reference_label": "", "target_label": ""}
+            return {
+                "reference_label": mark.reference_contour_id or "",
+                "target_label": mark.target_contour_id or "",
             }
 
         def _set_calculation_running(self, running: bool):
@@ -1199,6 +1245,7 @@ class MainWindowWorkflowMixin:
                 button.setEnabled(not running)
             self.operation_mode_combo.setEnabled(not running)
             self.side_tabs.setEnabled(not running)
+            self._update_roi_edit_lock()
 
         def _production_preflight_errors(self) -> list[str]:
             errors: list[str] = []
@@ -1264,7 +1311,7 @@ class MainWindowWorkflowMixin:
                             self._set_image_for_layer(mark_id, layer, load_image(path), "single")
                 for mark_id, layers in pending.get("batch_images", {}).items():
                     for layer, paths in layers.items():
-                        images = [load_image(path) for path in paths if path and Path(path).exists()]
+                        images = [BatchImageRef.from_path(path) for path in paths if path and Path(path).exists()]
                         self._append_batch_image_data(mark_id, layer, images)
                 self._sync_current_mark_images()
                 self._refresh_all_widgets()
@@ -1325,7 +1372,7 @@ class MainWindowWorkflowMixin:
                 self._append_log("已取消计算；配方 ROI 未确认。")
                 return
             job = self._calculation_job_snapshot()
-            self.recovery_store.save(self._recovery_payload())
+            self._active_recovery_job_id = self.recovery_store.save(self._recovery_payload())
             self._calculation_timed_out = False
             self.last_measurement_id = ""
             self.last_archive_path = ""
@@ -1361,6 +1408,11 @@ class MainWindowWorkflowMixin:
             return self._start_measurement_job()
 
         def cancel_calculation(self):
+            if self._preview_worker is not None:
+                self._preview_worker.cancel()
+                self.cancel_progress_btn.setEnabled(False)
+                self.progress_stage_label.setText("当前阶段：正在取消预览分析")
+                return
             if self._calculation_worker is not None:
                 self._calculation_worker.cancel()
                 self.cancel_progress_btn.setEnabled(False)
@@ -1374,12 +1426,20 @@ class MainWindowWorkflowMixin:
             self.statusBar().showMessage(message)
 
         def _on_calculation_completed(self, payload: dict):
-            self.detections = payload.get("detections", {})
+            self.roi_detections = payload.get("detections", {})
+            self.roi_detection_failures = payload.get("roi_failures", {"Mark1": [], "Mark2": []})
+            self.detections = {}
+            self._rebuild_legacy_manual_detections()
             self.overlays = payload.get("overlays", {})
             self.auto_candidates_by_mark = payload.get("auto_candidates", {"Mark1": {}, "Mark2": {}})
             self.auto_detections_by_mark = payload.get("auto_detections", {"Mark1": {}, "Mark2": {}})
             self.auto_overlays = payload.get("auto_overlays", {})
             self.auto_selections = payload.get("selections", self.auto_selections)
+            for mark_id, selection in self.auto_selections.items():
+                mark = self.marks.get(mark_id)
+                if mark is not None:
+                    mark.reference_contour_id = str(selection.get("reference_label", "") or "")
+                    mark.target_contour_id = str(selection.get("target_label", "") or "")
             self.batch_overlays = payload.get("batch_overlays", {"Mark1": [], "Mark2": []})
             self.batch_run_records = payload.get("batch_records", {"Mark1": [], "Mark2": []})
             self.geometry_result = payload.get("geometry_result", GeometryRunResult())
@@ -1400,7 +1460,11 @@ class MainWindowWorkflowMixin:
                     "追溯归档失败",
                     f"测量已完成，但自动追溯归档失败：\n{payload['archive_error']}\n\n请查看运行日志。",
                 )
-            self.recovery_store.clear()
+            self.recovery_store.finish(
+                "completed",
+                measurement_id=self.last_measurement_id,
+                archive_path=self.last_archive_path,
+            )
             if payload.get("batch") and hasattr(self, "result_tabs"):
                 self.result_tabs.setCurrentIndex(0)
             result_map = self.auto_overlays if self._is_auto_workflow() else self.overlays
@@ -1433,13 +1497,13 @@ class MainWindowWorkflowMixin:
 
         def _on_calculation_failed(self, message: str):
             self._calculation_timeout_timer.stop()
-            self.recovery_store.clear()
+            self.recovery_store.finish("archived", error=message)
             self.runtime_logger.error("Measurement failed: %s", message)
             QMessageBox.critical(self, "计算失败", self._friendly_error(Exception(message)))
 
         def _on_calculation_cancelled(self):
             self._calculation_timeout_timer.stop()
-            self.recovery_store.clear()
+            self.recovery_store.finish("archived", error="cancelled")
             if self._calculation_timed_out:
                 QMessageBox.critical(self, "计算超时", "计算已超过设置的任务超时时间并停止。")
                 self._append_log("计算超时并已停止。")
@@ -1495,6 +1559,16 @@ class MainWindowWorkflowMixin:
             )
             if not path:
                 return
+            if Path(path).suffix.lower() == ".csv":
+                answer = QMessageBox.question(
+                    self,
+                    "CSV 导出限制",
+                    "CSV 只能保存一个结果表，不包含识别明细、重复性、尺寸结果和 Mark 图片。\n\n仍要继续吗？",
+                    QMessageBox.Yes | QMessageBox.Cancel,
+                    QMessageBox.Cancel,
+                )
+                if answer != QMessageBox.Yes:
+                    return
             try:
                 rows = []
                 if has_batch_details:
@@ -1535,7 +1609,21 @@ class MainWindowWorkflowMixin:
                                     lower_file=record.get("lower_file", ""),
                                     run_index=int(record.get("run_index", 0) or 0),
                                 ))
-                            else:
+                            for failure in record.get("roi_failures", []):
+                                rows.append(build_detection_failure_row(
+                                    self.config,
+                                    int(record.get("run_index", 0) or 0),
+                                    mark_id,
+                                    record.get("upper_file", ""),
+                                    record.get("lower_file", ""),
+                                    failure.get("error", "ROI 识别失败"),
+                                    layer=failure.get("layer", ""),
+                                    roi_id=failure.get("roi_id", ""),
+                                    roi_index=failure.get("roi_index"),
+                                    roi_label=failure.get("roi_label", ""),
+                                    status=failure.get("status", "Error"),
+                                ))
+                            if not named and not record.get("roi_failures"):
                                 rows.append(build_detection_failure_row(
                                     self.config,
                                     int(record.get("run_index", 0) or 0),
@@ -1580,7 +1668,16 @@ class MainWindowWorkflowMixin:
                     self.config.auto_reference_label = "；".join(reference_names)
                     self.config.auto_target_label = "；".join(target_names)
                 else:
-                    for mark_id, layer_map in self.detections.items():
+                    reference_names = []
+                    target_names = []
+                    for mark_id, layer_map in self.roi_detections.items():
+                        selection = self.auto_selections.get(mark_id, {})
+                        reference_id = selection.get("reference_label", "")
+                        target_id = selection.get("target_label", "")
+                        if reference_id:
+                            reference_names.append(f"{mark_id}/{reference_id}")
+                        if target_id:
+                            target_names.append(f"{mark_id}/{target_id}")
                         upper = self._image_for_layer("upper", mark_id)
                         lower = self._image_for_layer("lower", mark_id) if self._current_mode() == "Dual Image" else None
                         rows.extend(build_detection_rows(
@@ -1590,6 +1687,22 @@ class MainWindowWorkflowMixin:
                             upper_file=upper.path if upper else "",
                             lower_file=lower.path if lower else "",
                         ))
+                        for failure in self.roi_detection_failures.get(mark_id, []):
+                            rows.append(build_detection_failure_row(
+                                self.config,
+                                1,
+                                mark_id,
+                                upper.path if upper else "",
+                                lower.path if lower else "",
+                                failure.get("error", "ROI 识别失败"),
+                                layer=failure.get("layer", ""),
+                                roi_id=failure.get("roi_id", ""),
+                                roi_index=failure.get("roi_index"),
+                                roi_label=failure.get("roi_label", ""),
+                                status=failure.get("status", "Error"),
+                            ))
+                    self.config.auto_reference_label = "; ".join(reference_names)
+                    self.config.auto_target_label = "; ".join(target_names)
                 with TemporaryDirectory() as tmp_dir:
                     mark_images = self._build_mark_image_exports(tmp_dir)
                     geometry_rows = []

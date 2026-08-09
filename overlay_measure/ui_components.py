@@ -164,6 +164,7 @@ class CollapsibleSection(QWidget):
 
 class ImageCanvas(QLabel):
     roiChanged = Signal(str, str, object)  # mark_id, layer, Roi
+    roiSelected = Signal(str, str, str)  # mark_id, layer, stable roi_id
     geometryClicked = Signal(str, object)  # layer, click payload
 
     def __init__(self, title: str, fixed_layer: Optional[str] = None, parent=None):
@@ -185,6 +186,7 @@ class ImageCanvas(QLabel):
         self.pan_y = 0.0
         self.active_mark_id = "Mark1"
         self.active_layer = fixed_layer or "upper"
+        self.active_roi_id = ""
         self.active_roi_type = "Annulus"
         self.active_roi_inner_ratio = 0.60
         self.active_roi_target_edge = "All Edges"
@@ -199,6 +201,7 @@ class ImageCanvas(QLabel):
         self.circle_preview_point = None
         self.marks: Dict[str, MarkRecipe] = {}
         self.detections: Dict[str, Dict[str, DetectionResult]] = {}
+        self.roi_detections: Dict[str, Dict[str, DetectionResult]] = {}
         self.auto_detections: Dict[str, Dict[str, DetectionResult]] = {}
         self.show_auto_detections = False
         self.manual_labels = {}
@@ -213,6 +216,7 @@ class ImageCanvas(QLabel):
         self.selected_caliper_detection_id = None
         self.caliper_selection_context = None
         self.display_enhancement = False
+        self.roi_editing_enabled = True
         self.pixel_size_x_um = 0.1
         self.pixel_size_y_um = 0.1
         self.drag_start_img: Optional[QPoint] = None
@@ -276,6 +280,8 @@ class ImageCanvas(QLabel):
         pixel_size_x_um: float = 0.1,
         pixel_size_y_um: float = 0.1,
         show_diagnostics: bool = False,
+        roi_detections=None,
+        active_roi_id: str = "",
     ):
         next_layer = self.fixed_layer or active_layer
         next_context = ("auto" if show_auto_detections else "manual", active_mark_id, next_layer)
@@ -284,6 +290,7 @@ class ImageCanvas(QLabel):
         self.caliper_selection_context = next_context
         self.active_mark_id = active_mark_id
         self.active_layer = next_layer
+        self.active_roi_id = str(active_roi_id or "")
         self.active_roi_type = roi_type
         self.active_roi_inner_ratio = float(roi_inner_ratio)
         self.active_roi_target_edge = roi_target_edge
@@ -295,6 +302,21 @@ class ImageCanvas(QLabel):
         self.active_diameter_mode = roi_diameter_mode
         self.marks = marks
         self.detections = detections
+        if roi_detections is None:
+            migrated = {}
+            for mark_id, layer_map in (detections or {}).items():
+                mark = marks.get(mark_id)
+                for layer, detection in layer_map.items():
+                    entries = mark.roi_entries(layer) if mark is not None else []
+                    roi_id = entries[0].roi_id if entries else layer
+                    migrated.setdefault(mark_id, {})[roi_id] = detection
+            self.roi_detections = migrated
+        else:
+            self.roi_detections = roi_detections
+        if not self.active_roi_id:
+            mark = marks.get(active_mark_id)
+            entries = mark.roi_entries(next_layer) if mark is not None else []
+            self.active_roi_id = entries[0].roi_id if entries else ""
         self.auto_detections = auto_detections or {}
         self.show_auto_detections = bool(show_auto_detections)
         self.manual_labels = manual_labels or {}
@@ -350,9 +372,18 @@ class ImageCanvas(QLabel):
         return best_id
 
     def _detection_key_hit(self, pos, tolerance_px: float = 10.0) -> str:
-        maps = self.auto_detections if self.show_auto_detections else self.detections
         best_key = ""
         best_distance = float(tolerance_px)
+        if not self.show_auto_detections:
+            for roi_id, detection in self.roi_detections.get(self.active_mark_id, {}).items():
+                if detection.layer != self.active_layer:
+                    continue
+                distance = self._detection_hit_distance(detection, pos)
+                if distance < best_distance:
+                    best_key = f"{self.active_mark_id}/{roi_id}:{detection.layer}"
+                    best_distance = distance
+            return best_key
+        maps = self.auto_detections
         for identity, layer_map in maps.items():
             for layer, detection in layer_map.items():
                 if layer != self.active_layer:
@@ -381,7 +412,7 @@ class ImageCanvas(QLabel):
         mode, identity, layer = self.selected_caliper_feature
         if mode == "auto":
             return self.auto_detections.get(identity, {}).get(layer)
-        return self.detections.get(identity, {}).get(layer)
+        return self.roi_detections.get(self.active_mark_id, {}).get(identity)
 
     def _drop_stale_caliper_selection(self):
         if not self.selected_caliper_feature:
@@ -395,10 +426,17 @@ class ImageCanvas(QLabel):
         self.selected_caliper_detection_id = id(detection)
         self.update()
 
-    def _manual_caliper_selected(self, mark_id: str, layer: str, detection: Optional[DetectionResult]) -> bool:
+    def _manual_caliper_selected(self, mark_id: str, roi_id: str, layer=None, detection: Optional[DetectionResult] = None) -> bool:
+        if detection is None and isinstance(layer, DetectionResult):
+            detection = layer
+            layer = roi_id
+            roi_id = self.active_roi_id or mark_id
         return (
             detection is not None
-            and self.selected_caliper_feature == ("manual", mark_id, layer)
+            and self.selected_caliper_feature in {
+                ("manual", roi_id, layer),
+                ("manual", mark_id, layer),
+            }
             and self.selected_caliper_detection_id == id(detection)
         )
 
@@ -412,15 +450,23 @@ class ImageCanvas(QLabel):
     def _manual_roi_visible(
         self,
         mark_id: str,
-        layer: str,
-        roi: Optional[Roi],
-        detection: Optional[DetectionResult],
+        roi_id: str,
+        layer=None,
+        roi: Optional[Roi] = None,
+        detection: Optional[DetectionResult] = None,
     ) -> bool:
+        if isinstance(layer, Roi):
+            legacy_roi = layer
+            legacy_detection = roi if isinstance(roi, DetectionResult) else None
+            layer = roi_id
+            roi_id = self.active_roi_id or mark_id
+            roi = legacy_roi
+            detection = legacy_detection
         if roi is None:
             return False
         if getattr(roi, "roi_type", "") != "Caliper Circle" or detection is None:
             return True
-        return self._manual_caliper_selected(mark_id, layer, detection)
+        return self._manual_caliper_selected(mark_id, roi_id, layer, detection)
 
     def _has_caliper_result_for_hint(self) -> bool:
         if self.show_auto_detections:
@@ -429,7 +475,7 @@ class ImageCanvas(QLabel):
                 for layer_map in self.auto_detections.values()
                 for detection in layer_map.values()
             )
-        detection = self.detections.get(self.active_mark_id, {}).get(self.active_layer)
+        detection = self.roi_detections.get(self.active_mark_id, {}).get(self.active_roi_id)
         roi = self._active_roi()
         return (
             roi is not None
@@ -514,6 +560,17 @@ class ImageCanvas(QLabel):
                 for start, end in pairs
             )
 
+        if detection.fitting_mode == "Line":
+            start = detection.shape_params.get("line_start_px")
+            end = detection.shape_params.get("line_end_px")
+            if start is not None and end is not None:
+                return self._point_segment_distance(
+                    float(pos.x()),
+                    float(pos.y()),
+                    QPointF(*self.image_to_widget(float(start[0]), float(start[1]))),
+                    QPointF(*self.image_to_widget(float(end[0]), float(end[1]))),
+                )
+
         contour = detection.shape_params.get(
             "candidate_contour_points",
             detection.shape_params.get("contour_points", detection.edge_points),
@@ -523,17 +580,50 @@ class ImageCanvas(QLabel):
     def _manual_caliper_hit(self, pos, tolerance_px: float = 9.0):
         mark_id = self.active_mark_id
         layer = self.active_layer
-        roi = self._active_roi()
-        detection = self.detections.get(mark_id, {}).get(layer)
-        if (
-            roi is None
-            or getattr(roi, "roi_type", "") != "Caliper Circle"
-            or not self._detection_has_calipers(detection)
-        ):
+        mark = self.marks.get(mark_id)
+        if mark is None:
             return None
-        if self._detection_hit_distance(detection, pos) <= tolerance_px:
-            return mark_id, layer, detection
-        return None
+        best = None
+        best_distance = float(tolerance_px)
+        for entry in mark.roi_entries(layer):
+            detection = self.roi_detections.get(mark_id, {}).get(entry.roi_id)
+            if (
+                getattr(entry.roi, "roi_type", "") != "Caliper Circle"
+                or not self._detection_has_calipers(detection)
+            ):
+                continue
+            distance = self._detection_hit_distance(detection, pos)
+            if distance <= best_distance:
+                best = (entry.roi_id, layer, detection)
+                best_distance = distance
+        return best
+
+    def _manual_roi_hit(self, pos, tolerance_px: float = 9.0) -> str:
+        mark = self.marks.get(self.active_mark_id)
+        point = self.widget_to_image_float(pos)
+        if mark is None or point is None:
+            return ""
+        best_id = ""
+        best_distance = float(tolerance_px)
+        for entry in mark.roi_entries(self.active_layer):
+            detection = self.roi_detections.get(self.active_mark_id, {}).get(entry.roi_id)
+            if detection is not None:
+                distance = self._detection_hit_distance(detection, pos)
+                if distance <= best_distance:
+                    best_id, best_distance = entry.roi_id, distance
+        if best_id:
+            return best_id
+        sample = np.array([[point[0], point[1]]], dtype=np.float64)
+        for entry in reversed(mark.roi_entries(self.active_layer)):
+            roi = entry.roi.normalized()
+            outer = roi
+            if roi.roi_type in {"Annulus", "Caliper Circle"}:
+                outer = replace(roi, roi_type="Circle", inner_ratio=0.0)
+            elif roi.roi_type == "Rectangular Ring":
+                outer = replace(roi, roi_type="Rectangle", inner_ratio=0.0)
+            if bool(outer.contains_points(sample)[0]):
+                return entry.roi_id
+        return ""
 
     def _nearest_auto_caliper_hit(self, pos, tolerance_px: float = 9.0):
         best = None
@@ -617,6 +707,12 @@ class ImageCanvas(QLabel):
         if typ == "Circle":
             radius = r.outer_radius() * self.scale
             painter.drawEllipse(QRectF(wcx - radius, wcy - radius, 2 * radius, 2 * radius))
+        elif typ == "Ellipse":
+            painter.save()
+            painter.translate(wcx, wcy)
+            painter.rotate(r.angle_deg)
+            painter.drawEllipse(QRectF(-r.w * self.scale / 2.0, -r.h * self.scale / 2.0, r.w * self.scale, r.h * self.scale))
+            painter.restore()
         elif typ in {"Annulus", "Caliper Circle"}:
             outer = r.outer_radius() * self.scale
             inner = r.inner_radius() * self.scale
@@ -643,17 +739,29 @@ class ImageCanvas(QLabel):
                 painter.drawEllipse(QRectF(wcx - mid, wcy - mid, 2 * mid, 2 * mid))
                 painter.setPen(pen)
                 self._draw_calipers(painter, r, color)
-        elif typ == "Rectangular Ring":
+        elif typ in {"Rectangular Ring", "Approximate Line"}:
             outer_poly = QPolygonF(self._rotated_rect_points_widget(cx, cy, r.w, r.h, r.angle_deg))
-            iw, ih = r.inner_size()
-            inner_poly = QPolygonF(self._rotated_rect_points_widget(cx, cy, iw, ih, r.angle_deg))
             painter.drawPolygon(outer_poly)
-            inner_pen = QPen(color, 1.8 if active else 1.2)
-            inner_pen.setStyle(Qt.DotLine)
-            inner_pen.setCosmetic(True)
-            painter.setPen(inner_pen)
-            painter.drawPolygon(inner_poly)
-            painter.setPen(pen)
+            if typ == "Rectangular Ring":
+                iw, ih = r.inner_size()
+                inner_poly = QPolygonF(self._rotated_rect_points_widget(cx, cy, iw, ih, r.angle_deg))
+                inner_pen = QPen(color, 1.8 if active else 1.2)
+                inner_pen.setStyle(Qt.DotLine)
+                inner_pen.setCosmetic(True)
+                painter.setPen(inner_pen)
+                painter.drawPolygon(inner_poly)
+                painter.setPen(pen)
+            else:
+                theta = np.deg2rad(r.angle_deg)
+                dx, dy = np.cos(theta) * r.w / 2.0, np.sin(theta) * r.w / 2.0
+                x0, y0 = self.image_to_widget(cx - dx, cy - dy)
+                x1, y1 = self.image_to_widget(cx + dx, cy + dy)
+                center_pen = QPen(QColor("#FFD60A"), 1.6)
+                center_pen.setStyle(Qt.DashLine)
+                center_pen.setCosmetic(True)
+                painter.setPen(center_pen)
+                painter.drawLine(int(x0), int(y0), int(x1), int(y1))
+                painter.setPen(pen)
         else:
             x, y = self.image_to_widget(r.x, r.y)
             painter.drawRect(QRectF(x, y, r.w * self.scale, r.h * self.scale))
@@ -666,7 +774,7 @@ class ImageCanvas(QLabel):
         if label:
             # Place label near the top-left of the outer bounding box.
             x, y = self.image_to_widget(r.x, r.y)
-            typ_label = {"Annulus": "圆环", "Caliper Circle": "卡尺圆", "Rectangular Ring": "矩形环", "Circle": "圆", "Rectangle": "矩形"}.get(typ, typ)
+            typ_label = {"Annulus": "圆环", "Caliper Circle": "卡尺圆", "Rectangular Ring": "矩形环", "Circle": "圆", "Ellipse": "椭圆", "Rectangle": "矩形", "Approximate Line": "近似直线", "Region Center": "区域中心", "Robust Center": "稳健中心"}.get(typ, typ)
             painter.drawText(int(x + 4), int(y + 16), f"{label} [{typ_label}]")
 
     def _draw_calipers(self, painter: QPainter, roi: Roi, color: QColor):
@@ -737,7 +845,9 @@ class ImageCanvas(QLabel):
         mark = self.marks.get(self.active_mark_id)
         if mark is None:
             return None
-        return mark.upper_roi if self.active_layer == "upper" else mark.lower_roi
+        entries = mark.roi_entries(self.active_layer)
+        entry = mark.roi_entry(self.active_layer, self.active_roi_id)
+        return (entry or (entries[0] if entries else None)).roi if entries else None
 
     def _roi_hit_part(self, pos) -> str:
         roi = self._active_roi()
@@ -760,18 +870,19 @@ class ImageCanvas(QLabel):
                 return "outer"
             return ""
 
-        if typ == "Rectangular Ring":
+        if typ in {"Rectangular Ring", "Approximate Line"}:
             xs = np.array([x], dtype=np.float64)
             ys = np.array([y], dtype=np.float64)
             xr, yr = r._local_rotated(xs, ys)
             ax, ay = abs(float(xr[0])), abs(float(yr[0]))
             ow, oh = max(r.w, 1e-9), max(r.h, 1e-9)
-            iw, ih = r.inner_size()
-            inner_dist = min(abs(ax - iw / 2.0), abs(ay - ih / 2.0))
             outer_dist = min(abs(ax - ow / 2.0), abs(ay - oh / 2.0))
             if ax <= ow / 2.0 + tol and ay <= oh / 2.0 + tol:
-                if inner_dist <= tol and ax <= iw / 2.0 + tol and ay <= ih / 2.0 + tol:
-                    return "inner"
+                if typ == "Rectangular Ring":
+                    iw, ih = r.inner_size()
+                    inner_dist = min(abs(ax - iw / 2.0), abs(ay - ih / 2.0))
+                    if inner_dist <= tol and ax <= iw / 2.0 + tol and ay <= ih / 2.0 + tol:
+                        return "inner"
                 if outer_dist <= tol:
                     return "outer"
         return ""
@@ -797,6 +908,8 @@ class ImageCanvas(QLabel):
             return float(np.hypot(x - cx, y - cy)) <= r.outer_radius()
         if r.roi_type == "Rectangular Ring":
             return bool(replace(r, roi_type="Rectangle").contains_points(np.array([[x, y]], dtype=np.float64))[0])
+        if r.roi_type == "Approximate Line":
+            return bool(r.contains_points(np.array([[x, y]], dtype=np.float64))[0])
         return bool(r.contains_points(np.array([[x, y]], dtype=np.float64))[0])
 
     def _circle_from_three_points(self, pts):
@@ -854,7 +967,9 @@ class ImageCanvas(QLabel):
         mark = self.marks.get(self.adjust_mark_id)
         if mark is None:
             return
-        roi = mark.upper_roi if self.adjust_layer == "upper" else mark.lower_roi
+        entries = mark.roi_entries(self.adjust_layer)
+        entry = mark.roi_entry(self.adjust_layer, self.active_roi_id)
+        roi = (entry or (entries[0] if entries else None)).roi if entries else None
         p = self.widget_to_image_float(pos)
         if roi is None or p is None:
             return
@@ -880,12 +995,12 @@ class ImageCanvas(QLabel):
                 roi.h = new_outer * 2.0
                 roi.inner_ratio = float(np.clip(inner / max(new_outer, 1e-9), 0.0, 0.98))
 
-        elif typ == "Rectangular Ring":
+        elif typ in {"Rectangular Ring", "Approximate Line"}:
             xs = np.array([x], dtype=np.float64)
             ys = np.array([y], dtype=np.float64)
             xr, yr = r._local_rotated(xs, ys)
             ax, ay = abs(float(xr[0])), abs(float(yr[0]))
-            if self.adjust_roi_part == "inner":
+            if self.adjust_roi_part == "inner" and typ == "Rectangular Ring":
                 ratio = max(ax / max(r.w / 2.0, 1e-9), ay / max(r.h / 2.0, 1e-9))
                 roi.inner_ratio = float(np.clip(ratio, 0.02, 0.98))
             elif self.adjust_roi_part == "outer":
@@ -898,7 +1013,8 @@ class ImageCanvas(QLabel):
                 roi.y = cy - new_h / 2.0
                 roi.w = new_w
                 roi.h = new_h
-                roi.inner_ratio = float(np.clip(max(inner_w / new_w, inner_h / new_h), 0.0, 0.98))
+                if typ == "Rectangular Ring":
+                    roi.inner_ratio = float(np.clip(max(inner_w / new_w, inner_h / new_h), 0.0, 0.98))
 
         self.roiChanged.emit(self.adjust_mark_id, self.adjust_layer, roi.normalized())
 
@@ -1056,6 +1172,37 @@ class ImageCanvas(QLabel):
         painter.drawText(ax0 + 48, ay0 + 5, "X")
         painter.drawText(ax0 - 10, ay0 - 48, "Y")
 
+    def _draw_secondary_detection(self, painter: QPainter, detection: DetectionResult, label: str):
+        """Draw a compact green result for non-active manual ROIs."""
+        color = QColor("#34C759")
+        pen = QPen(color, 1.7)
+        pen.setCosmetic(True)
+        painter.setPen(pen)
+        cx, cy = self.image_to_widget(detection.center_x_px, detection.center_y_px)
+        painter.drawLine(int(cx - 5), int(cy), int(cx + 5), int(cy))
+        painter.drawLine(int(cx), int(cy - 5), int(cx), int(cy + 5))
+        mode = detection.fitting_mode
+        if mode in {"Circle", "EdgeCenter", "CaliperCircle"}:
+            radius = float(detection.shape_params.get("radius_px", detection.diameter_px / 2.0)) * self.scale
+            painter.drawEllipse(QRectF(cx - radius, cy - radius, 2 * radius, 2 * radius))
+        elif mode == "Ellipse":
+            major = float(detection.shape_params.get("major_px", detection.diameter_px)) * self.scale
+            minor = float(detection.shape_params.get("minor_px", detection.diameter_px)) * self.scale
+            painter.drawEllipse(QRectF(cx - major / 2.0, cy - minor / 2.0, major, minor))
+        elif mode == "Line":
+            start = detection.shape_params.get("line_start_px")
+            end = detection.shape_params.get("line_end_px")
+            if start is not None and end is not None:
+                x0, y0 = self.image_to_widget(float(start[0]), float(start[1]))
+                x1, y1 = self.image_to_widget(float(end[0]), float(end[1]))
+                painter.drawLine(int(x0), int(y0), int(x1), int(y1))
+        else:
+            contour = detection.shape_params.get("contour_points") or detection.shape_params.get("region_box_points")
+            if contour and len(contour) >= 2:
+                points = [QPointF(*self.image_to_widget(float(x), float(y))) for x, y in contour]
+                painter.drawPolygon(QPolygonF(points))
+        painter.drawText(int(cx + 7), int(cy - 7), label)
+
     def _draw_overlays(self, painter: QPainter):
         if self.image is None:
             return
@@ -1073,12 +1220,27 @@ class ImageCanvas(QLabel):
                     continue
                 if not self.fixed_layer and layer != self.active_layer:
                     continue
-                roi = mark.upper_roi if layer == "upper" else mark.lower_roi
-                det = self.detections.get(mark_id, {}).get(layer)
+                entries = mark.roi_entries(layer)
+                active_entry = mark.roi_entry(layer, self.active_roi_id) or (entries[0] if entries else None)
+                roi = active_entry.roi if active_entry is not None else None
+                active_roi_id = active_entry.roi_id if active_entry is not None else ""
+                det = self.roi_detections.get(mark_id, {}).get(active_roi_id)
                 detection_valid = det is not None and det.shape_params.get("quality_status", "Valid") != "Invalid"
-                if self._manual_roi_visible(mark_id, layer, roi, det):
+                for index, entry in enumerate(entries, start=1):
+                    if entry.roi_id == active_roi_id:
+                        continue
+                    other_detection = self.roi_detections.get(mark_id, {}).get(entry.roi_id)
+                    if self._manual_roi_visible(mark_id, entry.roi_id, layer, entry.roi, other_detection):
+                        self._draw_roi_shape(
+                            painter, entry.roi, QColor(colors[layer].red(), colors[layer].green(), colors[layer].blue(), 135),
+                            False, f"{mark_id} {LAYER_LABELS[layer]} ROI {index}"
+                        )
+                    if other_detection is not None:
+                        self._draw_secondary_detection(painter, other_detection, f"ROI {index}")
+                if self._manual_roi_visible(mark_id, active_roi_id, layer, roi, det):
                     is_active = (mark_id == self.active_mark_id and layer == self.active_layer)
-                    self._draw_roi_shape(painter, roi, colors[layer], is_active, f"{mark_id} {LAYER_LABELS[layer]}")
+                    active_index = entries.index(active_entry) + 1 if active_entry in entries else 1
+                    self._draw_roi_shape(painter, roi, colors[layer], is_active, f"{mark_id} {LAYER_LABELS[layer]} ROI {active_index}")
 
                 if det is not None:
                     show_point_diagnostics = self.show_diagnostics or not detection_valid
@@ -1102,11 +1264,22 @@ class ImageCanvas(QLabel):
                     painter.setPen(QPen(fit_color, 2.0))
                     painter.drawLine(int(cx - 8), int(cy), int(cx + 8), int(cy))
                     painter.drawLine(int(cx), int(cy - 8), int(cx), int(cy + 8))
-                    contour_label = self.manual_labels.get((mark_id, layer), "")
+                    contour_label = self.manual_labels.get((mark_id, active_roi_id), "")
                     if contour_label:
                         label_x, label_y = self._contour_label_anchor(det)
                         painter.drawText(int(label_x + 6), int(label_y - 6), f"{contour_label} ({mark_id})")
-                    if det.fitting_mode in {"Circle", "EdgeCenter", "CaliperCircle"} and "radius_px" in det.shape_params:
+                    if det.fitting_mode == "Line":
+                        start = det.shape_params.get("line_start_px")
+                        end = det.shape_params.get("line_end_px")
+                        if start is not None and end is not None:
+                            x0, y0 = self.image_to_widget(float(start[0]), float(start[1]))
+                            x1, y1 = self.image_to_widget(float(end[0]), float(end[1]))
+                            line_pen = QPen(fit_color, 2.5)
+                            line_pen.setCosmetic(True)
+                            painter.setPen(line_pen)
+                            painter.drawLine(int(x0), int(y0), int(x1), int(y1))
+                            painter.drawText(int(cx + 10), int(cy - 10), f"直线 角度={det.shape_params.get('line_angle_deg', 0.0):.3f}°")
+                    elif det.fitting_mode in {"Circle", "EdgeCenter", "CaliperCircle"} and "radius_px" in det.shape_params:
                         rad = det.shape_params["radius_px"] * self.scale
                         painter.setPen(QPen(fit_color, 2.0))
                         painter.drawEllipse(QRectF(cx - rad, cy - rad, 2 * rad, 2 * rad))
@@ -1207,16 +1380,30 @@ class ImageCanvas(QLabel):
             self._draw_auto_detection_results(painter)
 
         if self.is_dragging and self.drag_start_img is not None and self.drag_current_img is not None:
-            preview_roi = Roi(
-                float(self.drag_start_img.x()),
-                float(self.drag_start_img.y()),
-                float(self.drag_current_img.x() - self.drag_start_img.x()),
-                float(self.drag_current_img.y() - self.drag_start_img.y()),
-                self.active_roi_type,
-                self.active_roi_inner_ratio,
-                self.active_roi_target_edge,
-                self.active_roi_angle_deg,
-            ).normalized()
+            x0, y0 = float(self.drag_start_img.x()), float(self.drag_start_img.y())
+            x1, y1 = float(self.drag_current_img.x()), float(self.drag_current_img.y())
+            if self.active_roi_type == "Approximate Line":
+                length = float(np.hypot(x1 - x0, y1 - y0))
+                band = max(12.0, 3.0 * float(self.active_caliper_width_px))
+                preview_roi = Roi(
+                    (x0 + x1 - length) / 2.0,
+                    (y0 + y1 - band) / 2.0,
+                    length,
+                    band,
+                    "Approximate Line",
+                    self.active_roi_inner_ratio,
+                    self.active_roi_target_edge,
+                    float(np.rad2deg(np.arctan2(y1 - y0, x1 - x0))),
+                    caliper_width_px=self.active_caliper_width_px,
+                ).normalized()
+            else:
+                preview_roi = Roi(
+                    x0, y0, x1 - x0, y1 - y0,
+                    self.active_roi_type,
+                    self.active_roi_inner_ratio,
+                    self.active_roi_target_edge,
+                    self.active_roi_angle_deg,
+                ).normalized()
             self._draw_roi_shape(painter, preview_roi, QColor(120, 255, 120), True, "预览")
 
         if self.circle_pick_mode and self.circle_pick_points:
@@ -1355,7 +1542,7 @@ class ImageCanvas(QLabel):
         if self.image is None:
             return
         if event.button() == Qt.RightButton:
-            if not self.circle_pick_mode and not self.show_auto_detections and self._point_in_active_roi_outer(event.position().toPoint()):
+            if self.roi_editing_enabled and not self.circle_pick_mode and not self.show_auto_detections and self._point_in_active_roi_outer(event.position().toPoint()):
                 menu = QMenu(self)
                 delete_action = menu.addAction("删除当前 ROI")
                 action = menu.exec(event.globalPosition().toPoint())
@@ -1406,6 +1593,9 @@ class ImageCanvas(QLabel):
                 event.accept()
                 return
             if self.circle_pick_mode:
+                if not self.roi_editing_enabled:
+                    event.accept()
+                    return
                 p = self.widget_to_image_float(event.position().toPoint())
                 if p is not None:
                     self.circle_pick_points.append(p)
@@ -1418,19 +1608,30 @@ class ImageCanvas(QLabel):
                 event.accept()
                 return
             manual_hit = self._manual_caliper_hit(event.position().toPoint())
-            current_detection = self.detections.get(self.active_mark_id, {}).get(self.active_layer)
+            current_detection = self.roi_detections.get(self.active_mark_id, {}).get(self.active_roi_id)
             manual_selected = self._manual_caliper_selected(
                 self.active_mark_id,
+                self.active_roi_id,
                 self.active_layer,
                 current_detection,
             )
             if manual_hit is not None and not manual_selected:
-                mark_id, layer, detection = manual_hit
-                self._select_caliper_detection("manual", mark_id, layer, detection)
+                roi_id, layer, detection = manual_hit
+                if roi_id != self.active_roi_id:
+                    self.roiSelected.emit(self.active_mark_id, layer, roi_id)
+                self._select_caliper_detection("manual", roi_id, layer, detection)
+                event.accept()
+                return
+            hit_roi_id = self._manual_roi_hit(event.position().toPoint())
+            if hit_roi_id and hit_roi_id != self.active_roi_id:
+                self.roiSelected.emit(self.active_mark_id, self.active_layer, hit_roi_id)
                 event.accept()
                 return
             if manual_selected and not self._point_in_active_roi_outer(event.position().toPoint()):
                 self.clear_caliper_selection()
+                event.accept()
+                return
+            if not self.roi_editing_enabled:
                 event.accept()
                 return
             hit_part = self._roi_hit_part(event.position().toPoint())
@@ -1558,7 +1759,22 @@ class ImageCanvas(QLabel):
             if p is not None:
                 x0, y0 = self.drag_start_img.x(), self.drag_start_img.y()
                 x1, y1 = p.x(), p.y()
-                if abs(x1 - x0) >= 5 and abs(y1 - y0) >= 5:
+                if self.active_roi_type == "Approximate Line" and np.hypot(x1 - x0, y1 - y0) >= 5:
+                    length = float(np.hypot(x1 - x0, y1 - y0))
+                    band = max(12.0, 3.0 * float(self.active_caliper_width_px))
+                    roi = Roi(
+                        (x0 + x1 - length) / 2.0,
+                        (y0 + y1 - band) / 2.0,
+                        length,
+                        band,
+                        "Approximate Line",
+                        self.active_roi_inner_ratio,
+                        self.active_roi_target_edge,
+                        float(np.rad2deg(np.arctan2(y1 - y0, x1 - x0))),
+                        caliper_width_px=self.active_caliper_width_px,
+                    ).normalized()
+                    self.roiChanged.emit(self.active_mark_id, self.active_layer, roi)
+                elif abs(x1 - x0) >= 5 and abs(y1 - y0) >= 5:
                     roi_type = self.active_roi_type
                     w = float(x1 - x0)
                     h = float(y1 - y0)

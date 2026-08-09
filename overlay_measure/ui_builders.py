@@ -167,7 +167,7 @@ class MainWindowBuilderMixin:
             self.title_label.setMinimumWidth(178)
             self.brand_subtitle_label = QLabel("See Once, Measure All  ·  视觉轮廓与对位量测平台")
             self.brand_subtitle_label.setObjectName("statusCaption")
-            self.version_label = QLabel("V2.0.0")
+            self.version_label = QLabel("V2.2.0")
             self.version_label.setObjectName("versionLabel")
             self.operation_mode_combo = QComboBox()
             self.operation_mode_combo.setObjectName("accessMode")
@@ -365,10 +365,9 @@ class MainWindowBuilderMixin:
             for page, title in (
                 (self._build_product_tab(), "① 产品信息"),
                 (self._build_image_tab(), "② 图像导入"),
-                (self._build_roi_tab(), "③ ROI 设置"),
+                (self._build_roi_tab(), "③ ROI 与轮廓"),
                 (self._build_algo_tab(), "④ 算法参数"),
-                (self._build_geometry_tab(), "⑤ 轮廓测量"),
-                (self._build_spec_tab(), "⑥ 结果导出"),
+                (self._build_spec_tab(), "⑤ 结果导出"),
             ):
                 scroll = QScrollArea()
                 scroll.setWidgetResizable(True)
@@ -658,6 +657,18 @@ class MainWindowBuilderMixin:
             form_mark.addRow("Mark编号", self.mark_combo)
             form_mark.addRow("当前层", self.layer_combo)
             self.roi_source_label = QLabel("未设置")
+            self.roi_index_combo = SidebarComboBox()
+            roi_actions = QWidget()
+            roi_actions_layout = QHBoxLayout(roi_actions)
+            roi_actions_layout.setContentsMargins(0, 0, 0, 0)
+            roi_actions_layout.setSpacing(4)
+            self.add_roi_btn = QPushButton("新增")
+            self.copy_roi_btn = QPushButton("复制")
+            self.delete_roi_btn = QPushButton("删除")
+            for button in (self.add_roi_btn, self.copy_roi_btn, self.delete_roi_btn):
+                roi_actions_layout.addWidget(button)
+            form_mark.addRow("ROI编号", self.roi_index_combo)
+            form_mark.addRow(roi_actions)
             self.roi_source_label.setObjectName("statusCaption")
             form_mark.addRow("当前 ROI 来源", self.roi_source_label)
             layout.addWidget(group_mark)
@@ -692,9 +703,13 @@ class MainWindowBuilderMixin:
             self.roi_type_combo = SidebarComboBox()
             self.roi_type_combo.addItem("矩形区域", "Rectangle")
             self.roi_type_combo.addItem("圆形区域", "Circle")
+            self.roi_type_combo.addItem("椭圆区域（计算圆度）", "Ellipse")
             self.roi_type_combo.addItem("卡尺圆", "Caliper Circle")
             self.roi_type_combo.addItem("圆环区域", "Annulus")
             self.roi_type_combo.addItem("矩形环区域", "Rectangular Ring")
+            self.roi_type_combo.addItem("近似直线", "Approximate Line")
+            self.roi_type_combo.addItem("区域中心区域", "Region Center")
+            self.roi_type_combo.addItem("稳健轮廓中心区域", "Robust Center")
             self.center_x_spin = SidebarDoubleSpinBox()
             self.center_y_spin = SidebarDoubleSpinBox()
             self.inner_radius_spin = SidebarDoubleSpinBox()
@@ -737,7 +752,7 @@ class MainWindowBuilderMixin:
             self.roi_angle_spin.setValue(0.0)
             self.three_point_circle_btn = QPushButton("三点定圆环中心")
             self.three_point_circle_btn.setCheckable(True)
-            self.apply_roi_params_btn = QPushButton("应用环形范围")
+            self.apply_roi_params_btn = QPushButton("应用 ROI 参数")
             self.clear_current_roi_btn = QPushButton("清除当前层 ROI")
             self.clear_recipe_rois_btn = QPushButton("清除全部配方 ROI")
             form_roi.addRow("ROI类型", self.roi_type_combo)
@@ -757,6 +772,10 @@ class MainWindowBuilderMixin:
             form_roi.addRow(self.clear_recipe_rois_btn)
             roi_section.add_widget(group_roi)
             layout.addWidget(roi_section)
+
+            contour_section = CollapsibleSection("轮廓测量", True)
+            contour_section.add_widget(self._build_geometry_tab())
+            layout.addWidget(contour_section)
 
             hint = QLabel("自动识别测量：先点击自动识别当前 Mark，再选择基准轮廓和待测轮廓。手动 ROI 测量：先框选并分析 ROI，再在下拉框中选择基准轮廓和待测轮廓。")
             hint.setWordWrap(True)
@@ -833,9 +852,8 @@ class MainWindowBuilderMixin:
             auto_rule_section.add_widget(group_auto_rule)
             layout.addWidget(auto_rule_section)
 
-            fit_section = CollapsibleSection("常用拟合设置", False)
-            group_fit = QGroupBox("常用拟合设置")
-            form_fit = QFormLayout(group_fit)
+            # Legacy fitting controls are kept as hidden compatibility state for
+            # old recipes. Manual fitting is now selected by each ROI type.
             self.fit_mode_combo = SidebarComboBox()
             self.fit_mode_combo.addItem("稳健中心（推荐）", "EdgeCenter")
             self.fit_mode_combo.addItem("区域中心", "RegionCenter")
@@ -852,11 +870,6 @@ class MainWindowBuilderMixin:
                 combo.addItem("圆拟合", "Circle")
                 combo.addItem("椭圆拟合", "Ellipse")
                 combo.addItem("矩形拟合", "Rectangle")
-            form_fit.addRow("默认识别方式", self.fit_mode_combo)
-            form_fit.addRow("上层识别方式", self.upper_fit_mode_combo)
-            form_fit.addRow("下层识别方式", self.lower_fit_mode_combo)
-            fit_section.add_widget(group_fit)
-            layout.addWidget(fit_section)
 
             rz_section = CollapsibleSection("Mark 分布与 Rz", False)
             group_rz = QGroupBox("Mark 分布 / Rz")
@@ -988,6 +1001,10 @@ class MainWindowBuilderMixin:
             self.reset_view_btn.clicked.connect(self.reset_canvas_views)
             self.mark_combo.currentTextChanged.connect(self.on_active_roi_selection_changed)
             self.layer_combo.currentTextChanged.connect(self.on_active_roi_selection_changed)
+            self.roi_index_combo.currentIndexChanged.connect(self.on_roi_index_changed)
+            self.add_roi_btn.clicked.connect(self.begin_add_roi)
+            self.copy_roi_btn.clicked.connect(self.copy_current_roi)
+            self.delete_roi_btn.clicked.connect(self.delete_current_roi)
             self.workflow_combo.currentIndexChanged.connect(self.on_workflow_mode_changed)
             self.auto_detect_btn.clicked.connect(self.auto_identify_marks)
             self.auto_reference_combo.currentIndexChanged.connect(self.on_auto_selection_changed)
@@ -1008,26 +1025,18 @@ class MainWindowBuilderMixin:
                 else:
                     widget.valueChanged.connect(self.on_auto_match_rule_changed)
             self.roi_type_combo.currentTextChanged.connect(self._refresh_all_widgets)
-            self.center_x_spin.valueChanged.connect(self.apply_roi_params_to_current)
-            self.center_y_spin.valueChanged.connect(self.apply_roi_params_to_current)
-            self.inner_radius_spin.valueChanged.connect(self.apply_roi_params_to_current)
-            self.outer_radius_spin.valueChanged.connect(self.apply_roi_params_to_current)
-            self.caliper_count_spin.valueChanged.connect(self.apply_roi_params_to_current)
-            self.caliper_width_spin.valueChanged.connect(self.apply_roi_params_to_current)
-            self.search_direction_combo.currentTextChanged.connect(self.apply_roi_params_to_current)
             self.target_edge_combo.currentTextChanged.connect(self._refresh_all_widgets)
             self.diameter_mode_combo.currentTextChanged.connect(self._refresh_all_widgets)
             self.inner_ratio_spin.valueChanged.connect(self._refresh_all_widgets)
             self.roi_angle_spin.valueChanged.connect(self._refresh_all_widgets)
             self.three_point_circle_btn.toggled.connect(self.on_three_point_circle_toggled)
-            self.fit_mode_combo.currentTextChanged.connect(self._refresh_all_widgets)
-            self.upper_fit_mode_combo.currentTextChanged.connect(self._refresh_all_widgets)
-            self.lower_fit_mode_combo.currentTextChanged.connect(self._refresh_all_widgets)
             self.apply_roi_params_btn.clicked.connect(self.apply_roi_params_to_current)
             self.clear_current_roi_btn.clicked.connect(self.clear_current_roi)
             self.clear_recipe_rois_btn.clicked.connect(self.clear_all_recipe_rois)
             self.upper_canvas.roiChanged.connect(self.set_roi)
             self.lower_canvas.roiChanged.connect(self.set_roi)
+            self.upper_canvas.roiSelected.connect(self.select_roi_from_canvas)
+            self.lower_canvas.roiSelected.connect(self.select_roi_from_canvas)
             self.upper_canvas.geometryClicked.connect(self._on_geometry_canvas_clicked)
             self.lower_canvas.geometryClicked.connect(self._on_geometry_canvas_clicked)
             # QPushButton.clicked emits a checked boolean. Passing that signal

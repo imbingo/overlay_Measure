@@ -7,7 +7,6 @@ from dataclasses import replace
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Dict, Optional
-
 import numpy as np
 from PIL import Image
 from PySide6.QtCore import QObject, QPoint, QPointF, QRectF, QThread, QTimer, Qt, QUrl, Signal, Slot
@@ -86,7 +85,7 @@ from .ui_components import (
     SidebarSpinBox,
 )
 from .ui_recipe_views import RecipeLibraryDialog, RecipeQuickMenu
-from .ui_workers import MeasurementWorker
+from .ui_workers import MeasurementWorker, PreviewWorker
 from .ui_frameless import FramelessWindowMixin
 from .ui_builders import MainWindowBuilderMixin
 from .ui_state import MainWindowStateMixin
@@ -98,10 +97,6 @@ from .ui_geometry import MainWindowGeometryMixin
 def application_icon_path() -> Path:
     runtime_root = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parents[1]))
     return runtime_root / "assets" / "overlay_measure_icon.png"
-
-
-
-
 
 
 
@@ -138,7 +133,7 @@ class MainWindow(
             if font_path.exists() and QFontDatabase.addApplicationFont(str(font_path)) >= 0:
                 break
         self.setFont(QFont("Microsoft YaHei UI", 9))
-        self.setWindowTitle("SOMA Vision Metrology V2.0.0")
+        self.setWindowTitle("SOMA Vision Metrology V2.2.0")
         icon_path = application_icon_path()
         if icon_path.exists():
             self.setWindowIcon(QIcon(str(icon_path)))
@@ -158,6 +153,18 @@ class MainWindow(
         }
         self.mark_image_sources = self._empty_image_sources()
         self.detections: Dict[str, Dict[str, DetectionResult]] = {}
+        # Full manual ROI results keyed by stable ROI id. ``detections`` remains
+        # the V2.0 compatibility projection (first result on each layer).
+        self.roi_detections: Dict[str, Dict[str, DetectionResult]] = {
+            "Mark1": {},
+            "Mark2": {},
+        }
+        self.roi_detection_failures = {"Mark1": [], "Mark2": []}
+        self._pending_new_roi = False
+        self._roi_undo_stack = []
+        self._roi_redo_stack = []
+        self._restoring_roi_history = False
+        self._manual_selection_requires_review = set()
         self.overlays = {}
         self.auto_detections_by_mark: Dict[str, Dict[str, Dict[str, DetectionResult]]] = {
             "Mark1": {},
@@ -202,16 +209,28 @@ class MainWindow(
         self._calculation_thread: Optional[QThread] = None
         self._calculation_worker: Optional[MeasurementWorker] = None
         self._calculation_running = False
+        self._preview_thread: Optional[QThread] = None
+        self._preview_worker: Optional[PreviewWorker] = None
+        self._preview_show_message = True
         self.step_rows = []
         self._initialize_geometry_state()
 
         self._apply_window_style()
         self._build_ui()
         self._connect_actions()
+        self._roi_undo_action = QAction("撤销 ROI", self)
+        self._roi_undo_action.setShortcut("Ctrl+Z")
+        self._roi_undo_action.triggered.connect(self.undo_roi_change)
+        self.addAction(self._roi_undo_action)
+        self._roi_redo_action = QAction("重做 ROI", self)
+        self._roi_redo_action.setShortcut("Ctrl+Y")
+        self._roi_redo_action.triggered.connect(self.redo_roi_change)
+        self.addAction(self._roi_redo_action)
         self._refresh_all_widgets()
         self._apply_operation_mode()
         if QApplication.platformName().lower() != "offscreen":
             QTimer.singleShot(0, self._offer_recovery)
+            QTimer.singleShot(200, self._warn_default_engineering_password)
 
     @staticmethod
     def _empty_roi_sources() -> dict:
@@ -429,14 +448,21 @@ class MainWindow(
         self._update_toolbar_density()
 
     def closeEvent(self, event):
-        thread = self._calculation_thread
-        if thread is not None and thread.isRunning():
-            if self._calculation_worker is not None:
-                self._calculation_worker.cancel()
-            if not thread.wait(5000):
-                event.ignore()
-                self._append_log("后台计算仍在停止，请稍候后再次关闭。")
-                return
+        for thread, worker in (
+            (self._preview_thread, self._preview_worker),
+            (self._calculation_thread, self._calculation_worker),
+        ):
+            if thread is not None and thread.isRunning():
+                if worker is not None:
+                    worker.cancel()
+                if not thread.wait(5000):
+                    event.ignore()
+                    QMessageBox.information(
+                        self,
+                        "正在停止后台任务",
+                        "后台算法正在安全退出。请稍候，再次关闭窗口。",
+                    )
+                    return
         super().closeEvent(event)
 
 

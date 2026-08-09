@@ -5,6 +5,7 @@ from typing import Callable, Dict, Iterable, Optional
 import numpy as np
 
 from .auto_mark_detector import detect_auto_marks_with_report
+from .batch_image_store import image_path, resolve_image
 from .batch_results import compact_detection_map
 from .batch_pairing import validate_batch_pairing
 from .candidate_ordering import assign_spatial_candidate_ids, resolve_preferred_candidate
@@ -42,7 +43,10 @@ def _choose_auto_selection(
         if not layer_map:
             continue
         detection = next(iter(layer_map.values()))
-        if detection.shape_params.get("quality_status") != "Valid":
+        if not detection.shape_params.get(
+            "measurement_eligible",
+            detection.shape_params.get("quality_status") == "Valid",
+        ):
             continue
         if _matches_auto_rule(detection, "reference", mark):
             references.append(label)
@@ -110,6 +114,8 @@ def detect_auto_set(
         except Exception as exc:
             measured = result
             measured.shape_params["quality_hard_failure"] = True
+            measured.shape_params["measurement_eligible"] = False
+            measured.shape_params["candidate_status"] = "DiagnosticOnly"
             measured.shape_params["failure_reason"] = f"精测失败：{exc}"
             measured.warning = measured.shape_params["failure_reason"]
         if not (params.diameter_min_um <= measured.diameter_um <= params.diameter_max_um):
@@ -117,6 +123,14 @@ def detect_auto_set(
             measured.shape_params["failure_reason"] = "尺寸超出配方范围"
             measured.warning = "尺寸超出配方范围"
         annotate_detection_quality(measured, config)
+        measured.shape_params["measurement_eligible"] = (
+            measured.shape_params.get("quality_status") == "Valid"
+            and not measured.shape_params.get("quality_hard_failure", False)
+        )
+        measured.shape_params.setdefault(
+            "candidate_status",
+            "MeasurementEligible" if measured.shape_params["measurement_eligible"] else "DiagnosticOnly",
+        )
         attach_algorithm_path(measured, "Auto")
         detected[label] = {result.layer: measured}
 
@@ -132,6 +146,10 @@ def detect_auto_set(
         reference = next(iter(detected[reference_label].values()))
         target = next(iter(detected[target_label].values()))
         overlay = calculate_relative_overlay(mark_id, reference, target, config)
+        overlay.reference_contour_id = reference_label
+        overlay.target_contour_id = target_label
+        overlay.reference_contour_name = reference_label
+        overlay.target_contour_name = target_label
         if config.recipe_validation_status != "Validated" and overlay.result != "Invalid":
             overlay.result = "Trial"
             overlay.warning = "试测/未验证配方，不作正式判定"
@@ -155,33 +173,80 @@ def _manual_overlay(
     cancelled: Optional[CancelCallback] = None,
 ) -> dict:
     detections: Dict[str, DetectionResult] = {}
+    failures: list[dict] = []
     tasks = []
     for layer in ("upper", "lower"):
-        roi = mark.upper_roi if layer == "upper" else mark.lower_roi
         image = images.get("upper") if config.mode == "Single Image" else images.get(layer)
-        if roi is not None and image is not None:
-            tasks.append((layer, image, roi))
-    for index, (layer, image, roi) in enumerate(tasks):
+        if image is None:
+            continue
+        for roi_index, entry in enumerate(mark.roi_entries(layer), start=1):
+            tasks.append((layer, image, entry, roi_index))
+    for index, (layer, image, entry, roi_index) in enumerate(tasks):
         if cancelled and cancelled():
             raise InterruptedError("用户取消计算")
         layer_name = "上层" if layer == "upper" else "下层"
         if progress:
             progress(80.0 * index / max(1, len(tasks)), f"正在分析{layer_name} ROI")
-        detections[layer] = detect_manual_roi(mark_id, layer, image, roi, params, config)
+        try:
+            detection = detect_manual_roi(mark_id, layer, image, entry.roi, params, config)
+            detection.shape_params["roi_id"] = entry.roi_id
+            detection.shape_params["roi_index"] = roi_index
+            detection.shape_params["roi_label"] = f"ROI {roi_index}"
+            detections[entry.roi_id] = detection
+        except InterruptedError:
+            raise
+        except Exception as exc:
+            failures.append({
+                "roi_id": entry.roi_id,
+                "roi_index": roi_index,
+                "roi_label": f"ROI {roi_index}",
+                "layer": layer,
+                "status": "Error",
+                "error": str(exc),
+            })
 
     preferred_selection = preferred_selection or {}
-    available = [layer for layer in ("upper", "lower") if layer in detections]
-    reference = preferred_selection.get("reference_label", "")
-    target = preferred_selection.get("target_label", "")
-    if reference not in detections:
-        reference = available[0] if available else ""
-    if target not in detections or target == reference:
-        target = next((layer for layer in available if layer != reference), "")
+    available = list(detections)
+
+    def resolve_legacy(value: str) -> str:
+        if value in detections:
+            return value
+        if value in {"upper", "lower"}:
+            return next(
+                (roi_id for roi_id, detection in detections.items() if detection.layer == value),
+                "",
+            )
+        return ""
+
+    requested_reference = str(preferred_selection.get("reference_label", "") or "")
+    requested_target = str(preferred_selection.get("target_label", "") or "")
+    reference = resolve_legacy(requested_reference)
+    target = resolve_legacy(requested_target)
+    if not requested_reference:
+        reference = next(
+            (roi_id for roi_id, detection in detections.items() if detection.layer == "upper"),
+            available[0] if available else "",
+        )
+    if not requested_target:
+        target = next(
+            (
+                roi_id
+                for roi_id, detection in detections.items()
+                if detection.layer == "lower" and roi_id != reference
+            ),
+            next((roi_id for roi_id in available if roi_id != reference), ""),
+        )
+    if target == reference:
+        target = ""
     overlay = None
     if reference and target:
         if progress:
             progress(95.0, "正在计算对位偏差")
         overlay = calculate_relative_overlay(mark_id, detections[reference], detections[target], config)
+        overlay.reference_contour_id = reference
+        overlay.target_contour_id = target
+        overlay.reference_contour_name = detections[reference].shape_params.get("roi_label", reference)
+        overlay.target_contour_name = detections[target].shape_params.get("roi_label", target)
         if config.recipe_validation_status != "Validated" and overlay.result != "Invalid":
             overlay.result = "Trial"
             overlay.warning = "试测/未验证配方，不作正式判定"
@@ -189,6 +254,7 @@ def _manual_overlay(
         "detections": detections,
         "selection": {"reference_label": reference, "target_label": target},
         "overlay": overlay,
+        "failures": failures,
     }
 
 
@@ -212,6 +278,11 @@ def _mean_overlay(mark_id: str, overlays: list[OverlayResult], config: Measureme
     if radius > config.overlay_r_limit_um:
         warnings.append("Dxy均值超限")
     result = OverlayResult(mark_id, 0.0, 0.0, dx, dy, radius, "Fail" if warnings else "Pass", "；".join(warnings))
+    first = overlays[0]
+    result.reference_contour_id = first.reference_contour_id
+    result.target_contour_id = first.target_contour_id
+    result.reference_contour_name = first.reference_contour_name
+    result.target_contour_name = first.target_contour_name
     result.quality_profile = quality_profile_display(config)
     grade_order = {
         "优秀（满足超精确）": 0,
@@ -231,6 +302,51 @@ def _mean_overlay(mark_id: str, overlays: list[OverlayResult], config: Measureme
 
 def _terminal_overlay(mark_id: str, result: str, warning: str) -> OverlayResult:
     return OverlayResult(mark_id, 0.0, 0.0, 0.0, 0.0, 0.0, result, warning)
+
+
+def run_preview_job(job: dict, progress: ProgressCallback, cancelled: CancelCallback) -> dict:
+    """Run auto-search or manual ROI preview without touching Qt/UI state."""
+    kind = str(job["kind"])
+    mark_id = str(job["mark_id"])
+    config: MeasurementConfig = job["config"]
+    params: DetectionParams = job["params"]
+    mark: MarkRecipe = job["mark"]
+    images = {
+        layer: resolve_image(value)
+        for layer, value in (job.get("images") or {}).items()
+    }
+    stage = lambda percent, message: progress(int(percent), 100, message)
+    if kind == "auto":
+        pairs = [("upper", images.get("upper"))]
+        if config.mode == "Dual Image":
+            pairs.append(("lower", images.get("lower")))
+        if any(image is None for _, image in pairs):
+            raise ValueError("缺少当前模式需要的图像")
+        measured = detect_auto_set(
+            mark_id,
+            mark,
+            pairs,
+            params,
+            config,
+            job.get("selection"),
+            lambda percent, message: stage(percent, message),
+            cancelled,
+        )
+    elif kind == "manual":
+        measured = _manual_overlay(
+            mark_id,
+            mark,
+            images,
+            params,
+            config,
+            job.get("selection"),
+            lambda percent, message: stage(percent, message),
+            cancelled,
+        )
+    else:
+        raise ValueError(f"未知预览任务：{kind}")
+    progress(100, 100, "预览分析完成")
+    return {"kind": kind, "mark_id": mark_id, "measured": measured}
 
 
 def run_measurement_job(job: dict, progress: ProgressCallback, cancelled: CancelCallback) -> dict:
@@ -263,6 +379,7 @@ def run_measurement_job(job: dict, progress: ProgressCallback, cancelled: Cancel
         "selections": {mark_id: dict(selections.get(mark_id, {})) for mark_id in ("Mark1", "Mark2")},
         "batch_overlays": {"Mark1": [], "Mark2": []},
         "batch_records": {"Mark1": [], "Mark2": []},
+        "roi_failures": {"Mark1": [], "Mark2": []},
         "geometry_result": GeometryRunResult(),
         "batch_geometry_results": [],
         "skipped": [], "warnings": [],
@@ -273,23 +390,28 @@ def run_measurement_job(job: dict, progress: ProgressCallback, cancelled: Cancel
             if cancelled():
                 raise InterruptedError("用户取消计算")
             if is_batch:
-                upper = job["batch_images"][mark_id]["upper"][run_index]
-                lower = job["batch_images"][mark_id]["lower"][run_index] if config.mode == "Dual Image" else None
+                upper_source = job["batch_images"][mark_id]["upper"][run_index]
+                lower_source = job["batch_images"][mark_id]["lower"][run_index] if config.mode == "Dual Image" else None
             else:
-                upper = job["mark_images"][mark_id].get("upper")
-                lower = job["mark_images"][mark_id].get("lower")
+                upper_source = job["mark_images"][mark_id].get("upper")
+                lower_source = job["mark_images"][mark_id].get("lower")
+            upper_file = image_path(upper_source)
+            lower_file = image_path(lower_source)
+            upper = resolve_image(upper_source)
+            lower = resolve_image(lower_source)
             images = {"upper": upper, "lower": lower}
             prefix = f"{mark_id} 第{run_index + 1}/{count}次" if is_batch else mark_id
             record = {
                 "run_index": run_index + 1,
-                "upper_file": upper.path if upper else "",
-                "lower_file": lower.path if lower else "",
+                "upper_file": upper_file,
+                "lower_file": lower_file,
                 "overlay": None,
                 "error": "",
                 "workflow": "Auto" if is_auto else "Manual",
                 "detections": {},
                 "candidates": {},
                 "selection": {},
+                "roi_failures": [],
             }
             try:
                 stage = lambda percent, message: progress(
@@ -317,16 +439,24 @@ def run_measurement_job(job: dict, progress: ProgressCallback, cancelled: Cancel
                 else:
                     measured = _manual_overlay(mark_id, marks[mark_id], images, params, config, selections.get(mark_id), stage, cancelled)
                     payload["detections"][mark_id] = measured["detections"]
+                    payload["roi_failures"][mark_id] = list(measured.get("failures", []))
                     payload["selections"][mark_id] = measured["selection"]
                     overlay = measured["overlay"]
                     record["detections"] = compact_detection_map(measured["detections"])
                     record["selection"] = dict(measured["selection"])
+                    record["roi_failures"] = list(measured.get("failures", []))
+                    for failure in record["roi_failures"]:
+                        payload["skipped"].append(
+                            f"{prefix} {failure['layer']} {failure['roi_label']}：{failure['error']}"
+                        )
                     run_geometry_detections = geometry_detection_runs.setdefault(run_index, {})
-                    for layer, detection in measured["detections"].items():
-                        run_geometry_detections[f"{mark_id}:{layer}"] = detection
+                    for roi_id, detection in measured["detections"].items():
+                        run_geometry_detections[f"{mark_id}/{roi_id}:{detection.layer}"] = detection
                 if overlay is None:
                     if geometry_configured:
                         record["overlay_skipped"] = "未配置成对的基准/待测轮廓，已跳过对位偏差"
+                    elif record["roi_failures"] and record["detections"]:
+                        raise ValueError("部分 ROI 识别失败，且未选择到两个有效轮廓")
                     else:
                         raise ValueError("未选择到两个有效轮廓，未生成对位结果")
                 else:

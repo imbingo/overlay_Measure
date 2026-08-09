@@ -1,5 +1,26 @@
 # Changelog
 
+## V2.2.0
+
+- Corrected minimum-enclosing-circle and robust-circle metrology to fit in calibrated physical coordinates, including non-square X/Y pixels; minimum-circle diameter is no longer confused with maximum Feret diameter.
+- Added ROI-level failure records with stable ROI ID, layer, index, status and error; a bad ROI no longer removes successful contours, and Excel retains every failed ROI.
+- Marked auto candidates whose precision refinement fails as diagnostic-only and excluded them from reference/target selection.
+- Moved Auto Identify and Analyze ROI preview work to cancellable background threads with real progress and explicit failure feedback.
+- Changed batch imports to lightweight path references loaded one image pair at a time, with large-count/data-size warnings.
+- Added centralized stale-result invalidation for mode changes and locked both canvas and backend ROI edits in Production mode.
+- Changed ROI parameter editing to an explicit Apply action, added context-sensitive controls, and added 20-step Engineering-mode ROI undo/redo.
+- Added recovery job IDs and running/completed/archived history, table rebuild suppression, state-aware Run guidance, CSV export warnings, and a first-use default-password warning.
+- Added V2.2 regression coverage for calibrated circles, ROI-level failures, production locks, stale-state invalidation, lazy batches and recovery lifecycle.
+
+## V2.1.0
+
+- Added unlimited manual ROIs per Mark/layer with stable IDs, numbered layer-local display labels, and add/copy/delete/switch controls.
+- Migrated legacy `upper_roi/lower_roi` recipes to ROI lists while keeping compatibility properties and legacy fitting behavior.
+- Changed manual analysis, background measurement, batch snapshots, geometry inputs, recognition details, and Excel exports to retain every ROI result.
+- Kept reference/target contour selection as the only overlay pairing mechanism; invalidated selections are never silently rebound to another contour.
+- Added canvas selection for ROI/fit contours, selected-ROI highlighting, and per-ROI result invalidation after edits.
+- Added reference/target contour names and stable IDs to overlay summary exports while preserving ellipse roundness and quality fields per ROI.
+
 ## V2.0.0
 
 - 产品名称升级为 **SOMA Vision Metrology**，加入 `See Once, Measure All` 与“视觉轮廓与对位量测平台”副标题；保留原 AppId、内部 EXE 名称和用户数据目录，支持从 V1.x 原位升级。

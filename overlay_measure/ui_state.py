@@ -51,10 +51,12 @@ from PySide6.QtWidgets import (
 from .auto_mark_detector import detect_auto_marks_with_report
 from .access_control import AccessController
 from .batch_pairing import validate_batch_pairing
+from .batch_image_store import resolve_image
 from .candidate_ordering import candidate_display_label
 from .export_naming import build_export_filename
 from .image_loader import SUPPORTED_EXTENSIONS, display_to_uint8, load_image
 from .measurement_engine import run_measurement_job
+from .geometry_models import GeometryRunResult
 from .measurement_service import attach_algorithm_path, describe_algorithm_path, detect_manual_roi
 from .measurement_units import ellipse_metrics_um, rotated_rect_size_um
 from .models import DetectionParams, DetectionResult, ImageData, MarkRecipe, MeasurementConfig, OverlayResult, Roi
@@ -185,11 +187,103 @@ class MainWindowStateMixin:
                 "工程模式：允许修改 ROI、算法参数和配方。" if engineering
                 else "生产模式：配方与算法参数已锁定。切换工程模式需要密码。"
             )
+            self._update_roi_edit_lock()
+
+        def _update_roi_edit_lock(self):
+            allowed = self.operation_mode == "Engineering" and not self._calculation_running
+            for canvas in (self.upper_canvas, self.lower_canvas):
+                canvas.roi_editing_enabled = allowed
+
+        def _roi_history_snapshot(self):
+            return (
+                deepcopy(self.marks),
+                deepcopy(self.auto_selections),
+                deepcopy(self.roi_sources),
+            )
+
+        def _push_roi_undo(self):
+            if self._restoring_roi_history or self.operation_mode != "Engineering":
+                return
+            self._roi_undo_stack.append(self._roi_history_snapshot())
+            del self._roi_undo_stack[:-20]
+            self._roi_redo_stack.clear()
+
+        def _restore_roi_history(self, snapshot):
+            self._restoring_roi_history = True
+            try:
+                self.marks, self.auto_selections, self.roi_sources = deepcopy(snapshot)
+                self.invalidate_measurement_state(
+                    "ROI 历史已恢复",
+                    clear_selections=False,
+                    clear_batch_results=True,
+                )
+                self._refresh_roi_index_combo()
+                self._refresh_auto_selection_combos()
+                self._refresh_all_widgets()
+            finally:
+                self._restoring_roi_history = False
+
+        def undo_roi_change(self):
+            if self.operation_mode != "Engineering" or not self._roi_undo_stack:
+                return
+            self._roi_redo_stack.append(self._roi_history_snapshot())
+            self._restore_roi_history(self._roi_undo_stack.pop())
+
+        def redo_roi_change(self):
+            if self.operation_mode != "Engineering" or not self._roi_redo_stack:
+                return
+            self._roi_undo_stack.append(self._roi_history_snapshot())
+            self._restore_roi_history(self._roi_redo_stack.pop())
+
+        def invalidate_measurement_state(
+            self,
+            reason: str = "",
+            *,
+            clear_selections: bool = True,
+            clear_batch_results: bool = True,
+        ):
+            """Clear every result derived from image, ROI, recipe, units or algorithm state."""
+            self.detections.clear()
+            self.roi_detections = {"Mark1": {}, "Mark2": {}}
+            self.roi_detection_failures = {"Mark1": [], "Mark2": []}
+            self.overlays.clear()
+            self.auto_detections_by_mark = {"Mark1": {}, "Mark2": {}}
+            self.auto_candidates_by_mark = {"Mark1": {}, "Mark2": {}}
+            self.auto_overlays.clear()
+            self.geometry_result = GeometryRunResult()
+            self.batch_geometry_results = []
+            if clear_batch_results:
+                self.batch_overlays = {"Mark1": [], "Mark2": []}
+                self.batch_run_records = {"Mark1": [], "Mark2": []}
+                self._batch_detail_run_index = 1
+                self._batch_detail_last_single_index = 1
+            if clear_selections:
+                self.auto_selections = {
+                    "Mark1": {"reference_label": "", "target_label": ""},
+                    "Mark2": {"reference_label": "", "target_label": ""},
+                }
+                for mark in self.marks.values():
+                    mark.reference_contour_id = ""
+                    mark.target_contour_id = ""
+            for canvas in (self.upper_canvas, self.lower_canvas):
+                canvas.clear_caliper_selection(update=False)
+            if reason:
+                self._append_log(f"{reason}，旧测量结果已失效，请重新运行测量程序。")
 
         def on_display_enhancement_changed(self, checked: bool):
             self.upper_canvas.set_display_enhancement(checked)
             self.lower_canvas.set_display_enhancement(checked)
             self._append_log("已开启显示增强。" if checked else "已关闭显示增强。")
+
+        def _warn_default_engineering_password(self):
+            if not self.access_controller.should_warn_default_password():
+                return
+            QMessageBox.warning(
+                self,
+                "工程密码安全提示",
+                "当前仍使用默认工程模式密码 admin123。正式投入产线前，请进入工程模式并修改密码。",
+            )
+            self.access_controller.acknowledge_default_password_warning()
 
         def _append_log(self, message: str):
             # V1.2.5：取消独立日志窗口，所有操作反馈统一显示在左下角状态栏，避免界面拥挤。
@@ -343,13 +437,127 @@ class MainWindowStateMixin:
             self._set_combo_value(self.auto_reference_combo, getattr(self.config, "auto_reference_label", ""))
             self._set_combo_value(self.auto_target_combo, getattr(self.config, "auto_target_label", ""))
 
-        def _current_roi(self):
+        def _current_roi_entry(self):
             mark_id = self.mark_combo.currentText() or "Mark1"
             layer = self._current_layer()
             mark = self.marks.get(mark_id)
             if not mark:
                 return None
-            return mark.upper_roi if layer == "upper" else mark.lower_roi
+            entries = mark.roi_entries(layer)
+            if not entries:
+                return None
+            roi_id = self.roi_index_combo.currentData() if hasattr(self, "roi_index_combo") else ""
+            return mark.roi_entry(layer, str(roi_id)) or entries[0]
+
+        def _current_roi(self):
+            entry = self._current_roi_entry()
+            return entry.roi if entry is not None else None
+
+        def _refresh_roi_index_combo(self, preferred_id: str = ""):
+            if not hasattr(self, "roi_index_combo"):
+                return
+            mark = self.marks.get(self._current_mark_id())
+            entries = mark.roi_entries(self._current_layer()) if mark else []
+            previous = preferred_id or str(self.roi_index_combo.currentData() or "")
+            self.roi_index_combo.blockSignals(True)
+            self.roi_index_combo.clear()
+            for index, entry in enumerate(entries, start=1):
+                self.roi_index_combo.addItem(f"ROI {index}", entry.roi_id)
+            if entries:
+                target = self.roi_index_combo.findData(previous)
+                self.roi_index_combo.setCurrentIndex(target if target >= 0 else 0)
+            self.roi_index_combo.blockSignals(False)
+            self.copy_roi_btn.setEnabled(bool(entries))
+            self.delete_roi_btn.setEnabled(bool(entries))
+
+        def on_roi_index_changed(self, *args):
+            self._pending_new_roi = False
+            self.on_active_roi_selection_changed()
+
+        def select_roi_from_canvas(self, mark_id: str, layer: str, roi_id: str):
+            self.mark_combo.setCurrentText(mark_id)
+            self._set_combo_value(self.layer_combo, layer)
+            self._refresh_roi_index_combo(roi_id)
+            self.on_active_roi_selection_changed()
+
+        def begin_add_roi(self):
+            if self.operation_mode != "Engineering":
+                self._append_log("生产模式不允许修改 ROI，请先进入工程模式。")
+                return
+            self._pending_new_roi = True
+            self.progress_stage_label.setText("当前阶段：请在图像上拖动创建新 ROI")
+            canvas = self.upper_canvas if self._current_layer() == "upper" or self._current_mode() == "Single Image" else self.lower_canvas
+            canvas.setCursor(Qt.CrossCursor)
+
+        def copy_current_roi(self):
+            if self.operation_mode != "Engineering":
+                self._append_log("生产模式不允许修改 ROI，请先进入工程模式。")
+                return
+            entry = self._current_roi_entry()
+            mark = self.marks.get(self._current_mark_id())
+            if entry is None or mark is None:
+                return
+            self._push_roi_undo()
+            copied = deepcopy(entry.roi)
+            copied.x += 12.0
+            copied.y += 12.0
+            new_entry = mark.add_roi(self._current_layer(), copied, "manual")
+            self._pending_new_roi = False
+            self._refresh_roi_index_combo(new_entry.roi_id)
+            self._invalidate_manual_roi(self._current_mark_id(), new_entry.roi_id)
+            self._refresh_all_widgets()
+
+        def delete_current_roi(self):
+            if self.operation_mode != "Engineering":
+                self._append_log("生产模式不允许修改 ROI，请先进入工程模式。")
+                return
+            mark = self.marks.get(self._current_mark_id())
+            entry = self._current_roi_entry()
+            if mark is None or entry is None:
+                return
+            answer = QMessageBox.question(self, "删除 ROI", "确定删除当前 ROI 及其识别结果吗？")
+            if answer != QMessageBox.Yes:
+                return
+            self._push_roi_undo()
+            removed_id = entry.roi_id
+            mark.remove_roi(self._current_layer(), removed_id)
+            self._invalidate_manual_roi(self._current_mark_id(), removed_id, remove_selection=True)
+            self._refresh_roi_index_combo()
+            self._refresh_all_widgets()
+
+        def _invalidate_manual_roi(self, mark_id: str, roi_id: str, remove_selection: bool = False):
+            removed_detection = self.roi_detections.setdefault(mark_id, {}).pop(roi_id, None)
+            self._rebuild_legacy_manual_detections(mark_id)
+            self.overlays.pop(mark_id, None)
+            self.geometry_result = GeometryRunResult()
+            selection = self.auto_selections.setdefault(mark_id, {"reference_label": "", "target_label": ""})
+            selection_cleared = False
+            for key in ("reference_label", "target_label"):
+                if selection.get(key) == roi_id:
+                    selection[key] = ""
+                    selection_cleared = True
+            mark = self.marks.get(mark_id)
+            if mark is not None:
+                if mark.reference_contour_id == roi_id:
+                    mark.reference_contour_id = ""
+                    selection_cleared = True
+                if mark.target_contour_id == roi_id:
+                    mark.target_contour_id = ""
+                    selection_cleared = True
+            if selection_cleared and (remove_selection or removed_detection is not None):
+                self._manual_selection_requires_review.add(mark_id)
+                self._append_log("所选轮廓已失效，请重新选择基准轮廓和待测轮廓。")
+
+        def _rebuild_legacy_manual_detections(self, mark_id: str = ""):
+            mark_ids = (mark_id,) if mark_id else tuple(self.roi_detections)
+            for current_mark_id in mark_ids:
+                projection = {}
+                for detection in self.roi_detections.get(current_mark_id, {}).values():
+                    projection.setdefault(detection.layer, detection)
+                if projection:
+                    self.detections[current_mark_id] = projection
+                else:
+                    self.detections.pop(current_mark_id, None)
 
         def _current_layer(self) -> str:
             return self.layer_combo.currentData() or "upper"
@@ -389,7 +597,7 @@ class MainWindowStateMixin:
                 images = self.batch_images.get(mark_id, {}).get(layer, [])
                 if images:
                     index = max(0, min(len(images) - 1, self._batch_detail_last_single_index - 1))
-                    return images[index]
+                    return resolve_image(images[index])
             image = self.mark_images[mark_id][layer]
             if image is None:
                 return None
@@ -436,6 +644,8 @@ class MainWindowStateMixin:
 
         def _current_manual_detection_map(self) -> dict:
             if not self._is_batch_mode() or not any(self.batch_run_records.values()):
+                if any(self.roi_detections.values()):
+                    return self.roi_detections
                 return self.detections
             result = {}
             for mark_id in ("Mark1", "Mark2"):
@@ -500,11 +710,13 @@ class MainWindowStateMixin:
 
         def _invalidate_image_dependent_results(self, mark_id: str, layer: str):
             if self._current_mode() == "Single Image":
+                self.roi_detections.pop(mark_id, None)
                 self.detections.pop(mark_id, None)
-            elif mark_id in self.detections:
-                self.detections[mark_id].pop(layer, None)
-                if not self.detections[mark_id]:
-                    self.detections.pop(mark_id, None)
+            else:
+                current = self.roi_detections.setdefault(mark_id, {})
+                for roi_id in [key for key, detection in current.items() if detection.layer == layer]:
+                    current.pop(roi_id, None)
+                self._rebuild_legacy_manual_detections(mark_id)
             self.overlays.pop(mark_id, None)
             self.auto_detections_by_mark[mark_id] = {}
             self.auto_candidates_by_mark[mark_id] = {}
@@ -564,7 +776,7 @@ class MainWindowStateMixin:
             )
 
         def _quality_settings_changed(self, message: str):
-            for mark_map in self.detections.values():
+            for mark_map in self.roi_detections.values():
                 for detection in mark_map.values():
                     annotate_detection_quality(detection, self.config)
             for detected_by_label in self.auto_detections_by_mark.values():
@@ -642,6 +854,7 @@ class MainWindowStateMixin:
                 self.three_point_circle_btn.blockSignals(False)
                 self.upper_canvas.set_circle_pick_mode(False)
                 self.lower_canvas.set_circle_pick_mode(False)
+            self._refresh_roi_index_combo()
             self._sync_current_mark_images()
             if hasattr(self, "auto_reference_combo"):
                 self._push_current_auto_match_rules()
@@ -687,39 +900,56 @@ class MainWindowStateMixin:
                 self.diameter_mode_combo.blockSignals(False)
                 self.inner_ratio_spin.blockSignals(False)
                 self.roi_angle_spin.blockSignals(False)
+                roi_type = getattr(roi, "roi_type", "")
+                circular = roi_type in {"Circle", "Annulus", "Caliper Circle"}
+                caliper = roi_type == "Caliper Circle"
+                self.inner_radius_spin.setEnabled(circular)
+                self.outer_radius_spin.setEnabled(circular)
+                self.caliper_count_spin.setEnabled(caliper)
+                self.caliper_width_spin.setEnabled(caliper)
+                self.search_direction_combo.setEnabled(caliper)
+                self.diameter_mode_combo.setEnabled(caliper)
+                self.polarity_combo.setEnabled(roi_type in {"Caliper Circle", "Approximate Line"})
             self._refresh_all_widgets()
 
         def apply_roi_params_to_current(self):
+            if self.operation_mode != "Engineering":
+                self._append_log("生产模式不允许修改 ROI，请先进入工程模式。")
+                return
             mark_id = self.mark_combo.currentText() or "Mark1"
             layer = self._current_layer()
             mark = self.marks.get(mark_id)
             if not mark:
                 return
-            roi = mark.upper_roi if layer == "upper" else mark.lower_roi
+            entry = self._current_roi_entry()
+            roi = entry.roi if entry is not None else None
             if roi is None:
                 return
+            self._push_roi_undo()
             cx = self.center_x_spin.value()
             cy = self.center_y_spin.value()
             inner = max(0.0, self.inner_radius_spin.value())
             outer = max(inner + 0.1, self.outer_radius_spin.value())
-            roi.x = cx - outer
-            roi.y = cy - outer
-            roi.w = outer * 2.0
-            roi.h = outer * 2.0
             roi.roi_type = self._auto_ring_roi_type(layer)
-            roi.inner_ratio = float(np.clip(inner / max(outer, 1e-9), 0.0, 0.98))
+            if roi.roi_type in {"Circle", "Annulus", "Caliper Circle"}:
+                roi.x = cx - outer
+                roi.y = cy - outer
+                roi.w = outer * 2.0
+                roi.h = outer * 2.0
+                roi.inner_ratio = float(np.clip(inner / max(outer, 1e-9), 0.0, 0.98))
+            else:
+                roi.x = cx - roi.w / 2.0
+                roi.y = cy - roi.h / 2.0
             roi.target_edge = self._combo_value(self.target_edge_combo)
             roi.angle_deg = self.roi_angle_spin.value()
             roi.caliper_count = self.caliper_count_spin.value()
             roi.caliper_width_px = self.caliper_width_spin.value()
             roi.search_direction = self._combo_value(self.search_direction_combo)
             roi.diameter_mode = self._combo_value(self.diameter_mode_combo)
+            entry.source = "manual"
             self.roi_sources.setdefault(mark_id, {})[layer] = "manual"
             self._recipe_roi_confirmation_signature = None
-            if mark_id in self.detections and layer in self.detections[mark_id]:
-                del self.detections[mark_id][layer]
-            if mark_id in self.overlays:
-                del self.overlays[mark_id]
+            self._invalidate_manual_roi(mark_id, entry.roi_id)
             # Reflect the just-drawn ROI parameters in the side panel.
             if mark_id == (self.mark_combo.currentText() or "Mark1") and layer == self._current_layer():
                 self._set_combo_value(self.roi_type_combo, getattr(roi, "roi_type", "Annulus"))
@@ -738,6 +968,7 @@ class MainWindowStateMixin:
             self._refresh_all_widgets()
 
         def _refresh_all_widgets(self, *args):
+            self._refresh_roi_index_combo()
             if hasattr(self, "batch_detail_bar"):
                 self.batch_detail_bar.setVisible(
                     self._is_batch_mode() and any(self.batch_run_records.values())
@@ -776,7 +1007,8 @@ class MainWindowStateMixin:
             roi_diameter_mode = self._combo_value(self.diameter_mode_combo) if hasattr(self, "diameter_mode_combo") else "Average"
             show_auto = self._is_auto_workflow()
             if hasattr(self, "roi_source_label"):
-                self.roi_source_label.setText(self._roi_source_text(self._roi_source(current_mark, current_layer)))
+                entry = self._current_roi_entry()
+                self.roi_source_label.setText(self._roi_source_text(entry.source if entry else "none"))
             if hasattr(self, "workflow_explanation_label"):
                 self.workflow_explanation_label.setText(
                     "全图自动识别：本次计算不会读取任何 ROI。"
@@ -796,7 +1028,7 @@ class MainWindowStateMixin:
                 current_mark,
                 current_layer,
                 self.marks,
-                self._current_manual_detection_map(),
+                self.detections,
                 upper_roi_type,
                 roi_inner_ratio,
                 roi_target_edge,
@@ -814,12 +1046,14 @@ class MainWindowStateMixin:
                 self.config.pixel_size_x_um,
                 self.config.pixel_size_y_um,
                 self.diagnostic_check.isChecked() if hasattr(self, "diagnostic_check") else False,
+                self._current_manual_detection_map(),
+                str(self.roi_index_combo.currentData() or ""),
             )
             self.lower_canvas.set_context(
                 current_mark,
                 current_layer,
                 self.marks,
-                self._current_manual_detection_map(),
+                self.detections,
                 lower_roi_type,
                 roi_inner_ratio,
                 roi_target_edge,
@@ -837,6 +1071,8 @@ class MainWindowStateMixin:
                 self.config.pixel_size_x_um,
                 self.config.pixel_size_y_um,
                 self.diagnostic_check.isChecked() if hasattr(self, "diagnostic_check") else False,
+                self._current_manual_detection_map(),
+                str(self.roi_index_combo.currentData() or ""),
             )
             self.lower_canvas.setVisible(is_dual)
             if hasattr(self, "lower_image_card"):
@@ -853,7 +1089,20 @@ class MainWindowStateMixin:
             )
             self.analyze_roi_btn.setEnabled(not show_auto)
             self.analyze_current_btn.setEnabled(not show_auto)
-            self.analyze_all_btn.setEnabled(True)
+            if self._is_batch_mode():
+                run_errors = validate_batch_pairing(self.batch_images, is_dual)
+                can_run = not run_errors
+                run_reason = "；".join(run_errors) if run_errors else "批量图像配对完整，可以运行"
+            else:
+                upper_ready = self._active_image_for_layer(current_mark, "upper") is not None
+                lower_ready = (not is_dual) or self._active_image_for_layer(current_mark, "lower") is not None
+                can_run = upper_ready and lower_ready
+                run_reason = "图像已就绪，可以运行" if can_run else "请先导入当前模式需要的图像"
+            if self.operation_mode == "Production" and not self.loaded_recipe_path:
+                can_run = False
+                run_reason = "生产模式必须先加载已验证配方"
+            self.analyze_all_btn.setEnabled(can_run and not self._calculation_running)
+            self.analyze_all_btn.setToolTip(run_reason)
             self.three_point_circle_btn.setEnabled(not show_auto)
             self.apply_roi_params_btn.setEnabled(not show_auto)
             self.clear_current_roi_btn.setEnabled(not show_auto)
@@ -935,12 +1184,11 @@ class MainWindowStateMixin:
                 value -= 1
 
         def _manual_detection_labels(self):
-            numbered = []
-            for mark_id, layer_map in self.detections.items():
-                for layer, detection in layer_map.items():
-                    numbered.append((detection.diameter_px, mark_id, layer))
-            numbered.sort(key=lambda item: (-item[0], item[1], item[2]))
-            return {(mark_id, layer): self._alpha_label(index) for index, (_, mark_id, layer) in enumerate(numbered)}
+            labels = {}
+            for mark_id, roi_map in self._current_manual_detection_map().items():
+                for roi_id, detection in roi_map.items():
+                    labels[(mark_id, roi_id)] = str(int(detection.shape_params.get("roi_index", 1)))
+            return labels
 
         def _display_detections(self):
             if not self._is_auto_workflow():
@@ -982,10 +1230,10 @@ class MainWindowStateMixin:
                                         "lower_file": record.get("lower_file", ""), "error": record.get("error", ""),
                                     })
                         else:
-                            for layer, item in detections.items():
+                            for roi_id, item in detections.items():
                                 entries.append({
                                     "run_index": record.get("run_index"), "mark_id": mark_id,
-                                    "layer": layer, "detection": item,
+                                    "layer": item.layer, "roi_id": roi_id, "detection": item,
                                     "upper_file": record.get("upper_file", ""),
                                     "lower_file": record.get("lower_file", ""), "error": record.get("error", ""),
                                 })
@@ -1000,9 +1248,10 @@ class MainWindowStateMixin:
                 return entries
             entries = []
             for mark_id, layer_map in self._display_detections().items():
-                for layer, detection in layer_map.items():
+                for roi_id, detection in layer_map.items():
                     entries.append({
-                        "run_index": None, "mark_id": mark_id, "layer": layer,
+                        "run_index": None, "mark_id": mark_id, "layer": detection.layer,
+                        "roi_id": roi_id,
                         "detection": detection, "upper_file": "", "lower_file": "", "error": "",
                     })
             return entries
@@ -1076,9 +1325,9 @@ class MainWindowStateMixin:
             states = [
                 ("完成", "信息可编辑"),
                 ("完成" if imported else "当前", "图像已加载" if imported else "等待导入图像"),
-                ("完成" if roi_ready or show_auto else ("当前" if imported else "待处理"), "ROI 已设置" if roi_ready else ("自动识别模式" if show_auto else "等待设置 ROI")),
+                ("完成" if roi_ready or show_auto or geometry_ready else ("当前" if imported else "待处理"),
+                 "ROI/轮廓工具已设置" if roi_ready or geometry_ready else ("自动识别模式" if show_auto else "等待设置 ROI")),
                 ("完成" if imported else "待处理", "参数已就绪" if imported else "导入图像后设置"),
-                ("完成" if geometry_ready else ("当前" if result_ready else "待处理"), "轮廓测量已运行" if geometry_ready else "可选几何量测程序"),
                 ("完成" if result_ready else "待处理", "可导出结果" if result_ready else "等待计算"),
             ]
             colors = {"待处理": "#A1A1A6", "当前": "#007AFF", "完成": "#34C759", "异常": "#FF3B30"}
@@ -1155,11 +1404,13 @@ class MainWindowStateMixin:
                 "质量状态", "质量门槛", "实际质量", "质量详情", "覆盖率",
                 "形状参数", "算法路径", "提示",
             ]
+            det_headers.insert(4, "ROI编号")
             det_rows = []
             manual_labels = self._manual_detection_labels()
             for entry in self._display_detection_entries():
                     mark_id = entry["mark_id"]
                     layer = entry["layer"]
+                    roi_id = entry.get("roi_id", "")
                     d = entry["detection"]
                     run_text = f"第{entry['run_index']}次" if entry.get("run_index") else ""
                     upper_name = Path(entry.get("upper_file", "")).name
@@ -1167,7 +1418,7 @@ class MainWindowStateMixin:
                     file_text = " / ".join(value for value in (upper_name, lower_name) if value)
                     if d is None:
                         det_rows.append([
-                            run_text, file_text, mark_id, "", "", "", "", "", "", "", "", "",
+                            run_text, file_text, mark_id, "", "", "", "", "", "", "", "", "", "",
                             "异常", quality_profile_display(self.config), "未评估", "", "", "", "", entry.get("error", ""),
                         ])
                         continue
@@ -1269,13 +1520,12 @@ class MainWindowStateMixin:
                     }.get(d.shape_params.get("roi_target_edge", ""), d.shape_params.get("roi_target_edge", ""))
                     roi_txt = f"ROI={roi_type_txt}, 边缘={edge_txt}"
                     display_mark_id = mark_id
-                    if not self._is_auto_workflow() and (mark_id, layer) in manual_labels:
-                        display_mark_id = f"{mark_id} [{manual_labels[(mark_id, layer)]}]"
+                    roi_text = f"ROI {int(d.shape_params.get('roi_index', 1))}" if roi_id else ""
                     ellipse_roundness = ""
                     if d.fitting_mode == "Ellipse":
                         ellipse_roundness = f"{ellipse_metrics_um(d.shape_params, self.config).get('ellipse_roundness_um', 0.0):.3f}"
                     det_rows.append([
-                        run_text, file_text, display_mark_id, LAYER_LABELS.get(layer, layer),
+                        run_text, file_text, display_mark_id, LAYER_LABELS.get(layer, layer), roi_text,
                         f"{d.center_x_um:.3f}", f"{d.center_y_um:.3f}",
                         f"{d.diameter_um:.3f}", ellipse_roundness, f"{d.residual_um:.3f}",
                         str(d.edge_point_count), f"{d.confidence:.3f}", mode_txt,
@@ -1289,7 +1539,7 @@ class MainWindowStateMixin:
                         d.warning or entry.get("error", ""),
                     ])
             self._fill_table(self.det_table, det_headers, det_rows)
-            roundness_header = self.det_table.horizontalHeaderItem(7)
+            roundness_header = self.det_table.horizontalHeaderItem(8)
             if roundness_header is not None:
                 roundness_header.setToolTip("椭圆圆度=(物理长轴-物理短轴)/2；非 ISO 最小区域圆度")
 
@@ -1322,6 +1572,13 @@ class MainWindowStateMixin:
             self._fill_table(self.overlay_table, ov_headers, ov_rows)
 
         def _fill_table(self, table: QTableWidget, headers, rows):
+            signature = (tuple(headers), tuple(tuple(str(value) for value in row) for row in rows))
+            if getattr(table, "_content_signature", None) == signature:
+                return
+            table._content_signature = signature
+            sorting = table.isSortingEnabled()
+            table.setSortingEnabled(False)
+            table.setUpdatesEnabled(False)
             table.setColumnCount(len(headers))
             table.setHorizontalHeaderLabels(headers)
             table.setRowCount(len(rows))
@@ -1347,6 +1604,8 @@ class MainWindowStateMixin:
                         item.setForeground(QColor(25, 107, 58))
                     table.setItem(r, c, item)
             table.resizeColumnsToContents()
+            table.setUpdatesEnabled(True)
+            table.setSortingEnabled(sorting)
 
         def zoom_canvases(self, factor: float):
             self.upper_canvas.zoom_by(factor)

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Iterable, Tuple
 
+import cv2
+
 import numpy as np
 
 from .models import MeasurementConfig
@@ -9,6 +11,60 @@ from .models import MeasurementConfig
 
 def mean_pixel_size_um(config: MeasurementConfig) -> float:
     return 0.5 * (float(config.pixel_size_x_um) + float(config.pixel_size_y_um))
+
+
+def points_px_to_um(
+    points_xy: Iterable[tuple[float, float]] | np.ndarray,
+    config: MeasurementConfig,
+) -> np.ndarray:
+    """Convert image points to calibrated physical coordinates (Y remains image-down)."""
+    points = np.asarray(list(points_xy) if not isinstance(points_xy, np.ndarray) else points_xy, dtype=np.float64)
+    if points.ndim != 2 or points.shape[1] != 2:
+        return np.empty((0, 2), dtype=np.float64)
+    scaled = points.copy()
+    scaled[:, 0] *= float(config.pixel_size_x_um)
+    scaled[:, 1] *= float(config.pixel_size_y_um)
+    return scaled
+
+
+def point_um_to_px(point_xy_um: tuple[float, float], config: MeasurementConfig) -> tuple[float, float]:
+    return (
+        float(point_xy_um[0]) / float(config.pixel_size_x_um),
+        float(point_xy_um[1]) / float(config.pixel_size_y_um),
+    )
+
+
+def minimum_enclosing_circle_um(
+    points_xy: Iterable[tuple[float, float]] | np.ndarray,
+    config: MeasurementConfig,
+) -> tuple[tuple[float, float], float, float]:
+    """Return calibrated center(px), radius(um) and radial RMS residual(um)."""
+    physical = points_px_to_um(points_xy, config)
+    if len(physical) < 3:
+        raise ValueError("轮廓点不足，无法计算最小外接圆")
+    (cx_um, cy_um), _ = cv2.minEnclosingCircle(physical.astype(np.float32))
+    radial = np.hypot(physical[:, 0] - cx_um, physical[:, 1] - cy_um)
+    # OpenCV intentionally pads the returned radius by a small epsilon. Use the
+    # calibrated farthest-point radius around its center to avoid a systematic
+    # positive diameter bias in metrology output.
+    radius_um = float(np.max(radial))
+    residual_um = float(np.sqrt(np.mean((radial - float(radius_um)) ** 2)))
+    return point_um_to_px((cx_um, cy_um), config), radius_um, residual_um
+
+
+def robust_circle_um(
+    points_xy: Iterable[tuple[float, float]] | np.ndarray,
+    config: MeasurementConfig,
+) -> tuple[tuple[float, float], float, float]:
+    """Fit a robust circle in calibrated coordinates, never in anisotropic pixels."""
+    from .circle_ellipse_fitter import fit_circle_geometric_robust, fit_circle_least_squares
+
+    physical = points_px_to_um(points_xy, config)
+    if len(physical) < 3:
+        raise ValueError("轮廓点不足，无法计算稳健外轮廓圆")
+    initial = fit_circle_least_squares(physical)
+    cx_um, cy_um, radius_um, residual_um = fit_circle_geometric_robust(physical, initial[:3])
+    return point_um_to_px((cx_um, cy_um), config), float(radius_um), float(residual_um)
 
 
 def axis_scale_um_per_px(config: MeasurementConfig, angle_deg: float) -> float:

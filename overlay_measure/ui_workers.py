@@ -53,7 +53,7 @@ from .access_control import AccessController
 from .batch_pairing import validate_batch_pairing
 from .export_naming import build_export_filename
 from .image_loader import SUPPORTED_EXTENSIONS, display_to_uint8, load_image
-from .measurement_engine import run_measurement_job
+from .measurement_engine import run_measurement_job, run_preview_job
 from .measurement_service import attach_algorithm_path, describe_algorithm_path, detect_manual_roi
 from .measurement_units import axis_scale_um_per_px, rotated_rect_size_um
 from .models import DetectionParams, DetectionResult, ImageData, MarkRecipe, MeasurementConfig, OverlayResult, Roi
@@ -105,4 +105,23 @@ class MeasurementWorker(QObject):
     @Slot()
     def cancel(self):
         self._cancel_requested = True
+
+
+class PreviewWorker(MeasurementWorker):
+    @Slot()
+    def run(self):
+        try:
+            result = run_preview_job(
+                self.job,
+                lambda done, total, text: self.progress.emit(done, total, text),
+                lambda: self._cancel_requested,
+            )
+            if self._cancel_requested:
+                self.cancelled.emit()
+            else:
+                self.finished.emit(result)
+        except InterruptedError:
+            self.cancelled.emit()
+        except Exception as exc:
+            self.failed.emit(str(exc))
 

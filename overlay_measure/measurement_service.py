@@ -19,6 +19,7 @@ from .measurement_units import (
 from .quality_profiles import annotate_detection_quality
 from .region_center_detector import detect_primary_contour_edges, detect_region_center
 from .subpixel_edge_detector import detect_subpixel_edges
+from .line_detector import detect_approximate_line
 
 
 LAYER_LABELS = {"upper": "上层", "lower": "下层"}
@@ -54,6 +55,8 @@ def _algorithm_path_for_detection(detection: DetectionResult, workflow: str = "M
         return "手动ROI → 三点/卡尺圆初始化 → 径向灰度峰值找边 → 同一圆周边缘筛选 → RANSAC圆拟合+稳健平均圆 → 中心差计算"
     if detection.fitting_mode == "RegionCenter":
         return "手动ROI → 区域分割 → 主区域最小外接矩形中心 → 中心差计算"
+    if detection.fitting_mode == "Line":
+        return "近似直线ROI → 法向灰度剖面 → 梯度峰值亚像素定位 → Huber直线拟合"
     if detection.fitting_mode == "EdgeCenter":
         prefix = "主目标分割 → 单轮廓亚像素边缘" if roi_type in {"Circle", "Rectangle"} else "亚像素边缘"
         return f"手动ROI({roi_type}) → {prefix} → 边缘点云质心/稳健中心 → 中心差计算"
@@ -150,6 +153,22 @@ def _fit_to_detection(
     return attach_algorithm_path(detection, "Manual")
 
 
+def fitting_mode_for_roi(roi: Roi, params: DetectionParams, layer: str) -> str:
+    """Use each ROI's semantic type as the authoritative fitting policy."""
+    mapping = {
+        "Circle": "Circle",
+        "Annulus": "Circle",
+        "Caliper Circle": "Circle",
+        "Ellipse": "Ellipse",
+        "Rectangle": "Rectangle",
+        "Rectangular Ring": "Rectangle",
+        "Region Center": "RegionCenter",
+        "Robust Center": "EdgeCenter",
+        "Approximate Line": "Line",
+    }
+    return mapping.get(getattr(roi, "roi_type", "Rectangle"), fitting_mode_for_layer(params, layer))
+
+
 def detect_manual_roi(
     mark_id: str,
     layer: str,
@@ -158,6 +177,12 @@ def detect_manual_roi(
     params: DetectionParams,
     config: MeasurementConfig,
 ) -> DetectionResult:
+    if getattr(roi, "roi_type", "") == "Approximate Line":
+        return attach_algorithm_path(
+            detect_approximate_line(mark_id, layer, image, roi, params, config),
+            "Manual",
+        )
+
     if getattr(roi, "roi_type", "") == "Caliper Circle":
         cal = detect_caliper_circle(image.gray, roi, params)
         diameter_um, residual_um = radial_diameter_residual_um(
@@ -247,16 +272,16 @@ def detect_manual_roi(
         annotate_detection_quality(detection, config)
         return attach_algorithm_path(detection, "Manual")
 
-    layer_fit_mode = fitting_mode_for_layer(params, layer)
+    layer_fit_mode = fitting_mode_for_roi(roi, params, layer)
     detect_params = replace(params, fitting_mode=layer_fit_mode)
     if detect_params.fitting_mode == "RegionCenter":
         fit = detect_region_center(image.gray, roi, detect_params)
         used_points = np.asarray(fit.shape_params.get("contour_points", []), dtype=np.float64)
         return _fit_to_detection(mark_id, layer, fit, used_points, config, roi, use_ransac=detect_params.use_ransac)
 
-    if getattr(roi, "roi_type", "") in {"Circle", "Rectangle"}:
+    if getattr(roi, "roi_type", "") in {"Circle", "Ellipse", "Rectangle", "Region Center", "Robust Center"}:
         expected_shape = "Circle" if detect_params.fitting_mode in {"Circle", "Ellipse"} else "Rectangle"
-        if detect_params.fitting_mode in {"Auto", "EdgeCenter"}:
+        if detect_params.fitting_mode in {"Auto", "EdgeCenter", "RegionCenter"}:
             expected_shape = "Any"
         edges = detect_primary_contour_edges(image.gray, roi, detect_params, expected_shape)
     else:

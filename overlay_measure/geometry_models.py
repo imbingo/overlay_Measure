@@ -89,6 +89,7 @@ class GeometryFeatureResult:
     quality: str = ""
     algorithm_path: str = ""
     error: str = ""
+    radius_um: Optional[float] = None
 
 
 @dataclass

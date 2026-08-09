@@ -99,4 +99,9 @@ def test_background_engine_reuses_main_measurement_service():
     # The production UI defines overlay as selected target minus selected reference.
     assert overlay.delta_x_um == pytest.approx(-0.2417, abs=0.02)
     assert overlay.delta_y_um == pytest.approx(-0.2528, abs=0.02)
-    assert "亚像素边缘" in payload["detections"]["Mark1"]["upper"].shape_params["algorithm_path"]
+    upper_detection = next(
+        detection
+        for detection in payload["detections"]["Mark1"].values()
+        if detection.layer == "upper"
+    )
+    assert "亚像素边缘" in upper_detection.shape_params["algorithm_path"]

@@ -45,6 +45,10 @@ def build_summary_rows(
             verdict = "通过"
             hint = ""
         rows.append({
+            "基准轮廓": o.reference_contour_name,
+            "基准ROI稳定ID": o.reference_contour_id,
+            "待测轮廓": o.target_contour_name,
+            "待测ROI稳定ID": o.target_contour_id,
             "项目": mark_id,
             f"Dx{idx}(μm)": dx,
             f"Dy{idx}(μm)": dy,

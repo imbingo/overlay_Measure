@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
+from uuid import uuid4
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
@@ -77,10 +78,22 @@ class Roi:
     def to_int_bounds(self, shape: Tuple[int, int]) -> Tuple[int, int, int, int]:
         roi = self.normalized()
         height, width = shape[:2]
-        x0 = max(0, min(width - 1, int(np.floor(roi.x))))
-        y0 = max(0, min(height - 1, int(np.floor(roi.y))))
-        x1 = max(0, min(width, int(np.ceil(roi.x + roi.w))))
-        y1 = max(0, min(height, int(np.ceil(roi.y + roi.h))))
+        if roi.roi_type == "Approximate Line":
+            cx, cy = roi.center()
+            theta = np.deg2rad(roi.angle_deg)
+            cosine, sine = np.cos(theta), np.sin(theta)
+            corners = []
+            for lx, ly in ((-roi.w / 2, -roi.h / 2), (roi.w / 2, -roi.h / 2),
+                           (roi.w / 2, roi.h / 2), (-roi.w / 2, roi.h / 2)):
+                corners.append((cx + cosine * lx - sine * ly, cy + sine * lx + cosine * ly))
+            xs, ys = zip(*corners)
+            left, top, right, bottom = min(xs), min(ys), max(xs), max(ys)
+        else:
+            left, top, right, bottom = roi.x, roi.y, roi.x + roi.w, roi.y + roi.h
+        x0 = max(0, min(width - 1, int(np.floor(left))))
+        y0 = max(0, min(height - 1, int(np.floor(top))))
+        x1 = max(0, min(width, int(np.ceil(right))))
+        y1 = max(0, min(height, int(np.ceil(bottom))))
         if x1 <= x0:
             x1 = min(width, x0 + 1)
         if y1 <= y0:
@@ -115,12 +128,20 @@ class Roi:
                 return radius <= outer
             return (radius >= roi.inner_radius()) & (radius <= outer)
 
+        if roi_type == "Ellipse":
+            xr, yr = roi._local_rotated(xs, ys)
+            return (xr / max(roi.w / 2.0, 1e-9)) ** 2 + (yr / max(roi.h / 2.0, 1e-9)) ** 2 <= 1.0
+
         if roi_type == "Rectangular Ring":
             xr, yr = roi._local_rotated(xs, ys)
             inner_w, inner_h = roi.inner_size()
             inside_outer = (np.abs(xr) <= roi.w / 2.0) & (np.abs(yr) <= roi.h / 2.0)
             inside_inner = (np.abs(xr) <= inner_w / 2.0) & (np.abs(yr) <= inner_h / 2.0)
             return inside_outer & (~inside_inner)
+
+        if roi_type == "Approximate Line":
+            xr, yr = roi._local_rotated(xs, ys)
+            return (np.abs(xr) <= roi.w / 2.0) & (np.abs(yr) <= roi.h / 2.0)
 
         return (xs >= roi.x) & (xs <= roi.x + roi.w) & (ys >= roi.y) & (ys <= roi.y + roi.h)
 
@@ -220,16 +241,112 @@ class MeasurementConfig:
 
 
 @dataclass
+class RoiEntry:
+    """Stable identity wrapper for a manually configured ROI."""
+
+    roi_id: str
+    roi: Roi
+    source: str = "manual"
+
+
+@dataclass(init=False)
 class MarkRecipe:
+    """Recipe data for one Mark, including multiple ROIs on each layer.
+
+    ``upper_roi`` and ``lower_roi`` remain compatibility properties for V1/V2.0
+    integrations. They expose the first ROI on a layer; new code should use
+    ``roi_entries`` and stable ``roi_id`` values.
+    """
+
     mark_id: str
-    upper_roi: Optional[Roi] = None
-    lower_roi: Optional[Roi] = None
-    reference_shape: str = "Any"
-    target_shape: str = "Any"
-    reference_size_min_um: float = 0.0
-    reference_size_max_um: float = 999999.0
-    target_size_min_um: float = 0.0
-    target_size_max_um: float = 999999.0
+    upper_rois: List[RoiEntry]
+    lower_rois: List[RoiEntry]
+    reference_contour_id: str
+    target_contour_id: str
+    reference_shape: str
+    target_shape: str
+    reference_size_min_um: float
+    reference_size_max_um: float
+    target_size_min_um: float
+    target_size_max_um: float
+
+    def __init__(
+        self,
+        mark_id: str,
+        upper_roi: Optional[Roi] = None,
+        lower_roi: Optional[Roi] = None,
+        reference_shape: str = "Any",
+        target_shape: str = "Any",
+        reference_size_min_um: float = 0.0,
+        reference_size_max_um: float = 999999.0,
+        target_size_min_um: float = 0.0,
+        target_size_max_um: float = 999999.0,
+        *,
+        upper_rois: Optional[List[RoiEntry]] = None,
+        lower_rois: Optional[List[RoiEntry]] = None,
+        reference_contour_id: str = "",
+        target_contour_id: str = "",
+    ):
+        self.mark_id = mark_id
+        self.upper_rois = list(upper_rois or [])
+        self.lower_rois = list(lower_rois or [])
+        if upper_roi is not None and not self.upper_rois:
+            self.upper_rois.append(RoiEntry("upper-1", upper_roi))
+        if lower_roi is not None and not self.lower_rois:
+            self.lower_rois.append(RoiEntry("lower-1", lower_roi))
+        self.reference_contour_id = reference_contour_id
+        self.target_contour_id = target_contour_id
+        self.reference_shape = reference_shape
+        self.target_shape = target_shape
+        self.reference_size_min_um = reference_size_min_um
+        self.reference_size_max_um = reference_size_max_um
+        self.target_size_min_um = target_size_min_um
+        self.target_size_max_um = target_size_max_um
+
+    def roi_entries(self, layer: LayerName) -> List[RoiEntry]:
+        return self.upper_rois if layer == "upper" else self.lower_rois
+
+    def roi_entry(self, layer: LayerName, roi_id: str) -> Optional[RoiEntry]:
+        return next((item for item in self.roi_entries(layer) if item.roi_id == roi_id), None)
+
+    def add_roi(self, layer: LayerName, roi: Roi, source: str = "manual", roi_id: str = "") -> RoiEntry:
+        prefix = "upper" if layer == "upper" else "lower"
+        entry = RoiEntry(roi_id or f"{prefix}-{uuid4().hex}", roi, source)
+        self.roi_entries(layer).append(entry)
+        return entry
+
+    def remove_roi(self, layer: LayerName, roi_id: str) -> Optional[RoiEntry]:
+        entries = self.roi_entries(layer)
+        for index, item in enumerate(entries):
+            if item.roi_id == roi_id:
+                return entries.pop(index)
+        return None
+
+    @property
+    def upper_roi(self) -> Optional[Roi]:
+        return self.upper_rois[0].roi if self.upper_rois else None
+
+    @upper_roi.setter
+    def upper_roi(self, roi: Optional[Roi]):
+        if roi is None:
+            self.upper_rois.clear()
+        elif self.upper_rois:
+            self.upper_rois[0].roi = roi
+        else:
+            self.upper_rois.append(RoiEntry("upper-1", roi))
+
+    @property
+    def lower_roi(self) -> Optional[Roi]:
+        return self.lower_rois[0].roi if self.lower_rois else None
+
+    @lower_roi.setter
+    def lower_roi(self, roi: Optional[Roi]):
+        if roi is None:
+            self.lower_rois.clear()
+        elif self.lower_rois:
+            self.lower_rois[0].roi = roi
+        else:
+            self.lower_rois.append(RoiEntry("lower-1", roi))
 
 
 @dataclass
@@ -272,6 +389,10 @@ class OverlayResult:
     quality_profile: str = ""
     quality_grade: str = ""
     quality_summary: str = ""
+    reference_contour_id: str = ""
+    target_contour_id: str = ""
+    reference_contour_name: str = ""
+    target_contour_name: str = ""
 
 
 def dataclass_to_dict(obj):
