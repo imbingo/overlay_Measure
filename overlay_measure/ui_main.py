@@ -1,5 +1,4 @@
 from __future__ import annotations
-
 import sys
 import re
 from copy import deepcopy
@@ -47,6 +46,7 @@ from PySide6.QtWidgets import (
     QWidgetAction,
 )
 
+from . import __version__
 from .auto_mark_detector import detect_auto_marks_with_report
 from .access_control import AccessController
 from .batch_pairing import validate_batch_pairing
@@ -72,7 +72,6 @@ from .recipe_integrity import seal_recipe, verify_recipe
 from .result_exporter import build_detection_rows, export_results
 from .rz_calculator import build_summary_rows
 from .runtime_support import RecoveryStore, build_runtime_logger
-
 
 from .ui_constants import LAYER_LABELS, RESULT_LABELS, STEP_TITLES
 from .ui_components import (
@@ -133,7 +132,7 @@ class MainWindow(
             if font_path.exists() and QFontDatabase.addApplicationFont(str(font_path)) >= 0:
                 break
         self.setFont(QFont("Microsoft YaHei UI", 9))
-        self.setWindowTitle("SOMA Vision Metrology V2.2.2")
+        self.setWindowTitle(f"SOMA Vision Metrology V{__version__}")
         icon_path = application_icon_path()
         if icon_path.exists():
             self.setWindowIcon(QIcon(str(icon_path)))
@@ -164,6 +163,7 @@ class MainWindow(
         self._roi_undo_stack = []
         self._roi_redo_stack = []
         self._restoring_roi_history = False
+        self._initialize_roi_parameter_edit()
         self._manual_selection_requires_review = set()
         self.overlays = {}
         self.auto_detections_by_mark: Dict[str, Dict[str, Dict[str, DetectionResult]]] = {

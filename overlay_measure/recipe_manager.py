@@ -5,6 +5,7 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Dict, List
 
+from . import __version__
 from .geometry_models import GeometryProgram
 from .models import DetectionParams, MarkRecipe, MeasurementConfig, Roi, RoiEntry
 
@@ -65,7 +66,7 @@ def save_recipe(
 ) -> None:
     data = {
         "software_name": "SOMA Vision Metrology",
-        "version": "2.2.2",
+        "version": __version__,
         "roi_fit_policy": "roi_type",
         "measurement_config": asdict(config),
         "detection_params": asdict(params),

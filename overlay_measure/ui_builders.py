@@ -48,6 +48,7 @@ from PySide6.QtWidgets import (
     QWidgetAction,
 )
 
+from . import __version__
 from .auto_mark_detector import detect_auto_marks_with_report
 from .access_control import AccessController
 from .batch_pairing import validate_batch_pairing
@@ -167,7 +168,7 @@ class MainWindowBuilderMixin:
             self.title_label.setMinimumWidth(178)
             self.brand_subtitle_label = QLabel("See Once, Measure All  ·  视觉轮廓与对位量测平台")
             self.brand_subtitle_label.setObjectName("statusCaption")
-            self.version_label = QLabel("V2.2.2")
+            self.version_label = QLabel(f"V{__version__}")
             self.version_label.setObjectName("versionLabel")
             self.operation_mode_combo = QComboBox()
             self.operation_mode_combo.setObjectName("accessMode")
@@ -1030,12 +1031,16 @@ class MainWindowBuilderMixin:
             self.three_point_circle_btn.toggled.connect(self.on_three_point_circle_toggled)
             self.upper_canvas.roiChanged.connect(self.set_roi)
             self.lower_canvas.roiChanged.connect(self.set_roi)
+            self.upper_canvas.roiEditCommitted.connect(self.commit_canvas_roi_edit)
+            self.lower_canvas.roiEditCommitted.connect(self.commit_canvas_roi_edit)
             self.upper_canvas.roiSelected.connect(self.select_roi_from_canvas)
             self.lower_canvas.roiSelected.connect(self.select_roi_from_canvas)
             self.upper_canvas.roiSelectionCleared.connect(self.clear_roi_selection)
             self.lower_canvas.roiSelectionCleared.connect(self.clear_roi_selection)
             self.upper_canvas.roiContextAction.connect(self.handle_roi_context_action)
             self.lower_canvas.roiContextAction.connect(self.handle_roi_context_action)
+            self.upper_canvas.interactionMessage.connect(self.show_canvas_interaction_message)
+            self.lower_canvas.interactionMessage.connect(self.show_canvas_interaction_message)
             self.upper_canvas.geometryClicked.connect(self._on_geometry_canvas_clicked)
             self.lower_canvas.geometryClicked.connect(self._on_geometry_canvas_clicked)
             self.upper_canvas.geometryCommand.connect(self.handle_geometry_command)

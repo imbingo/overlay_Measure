@@ -201,6 +201,13 @@ class MainWindowStateMixin:
                 deepcopy(self.roi_sources),
             )
 
+        def _initialize_roi_parameter_edit(self):
+            self._roi_parameter_edit_active = False
+            self._roi_parameter_edit_timer = QTimer(self)
+            self._roi_parameter_edit_timer.setSingleShot(True)
+            self._roi_parameter_edit_timer.setInterval(300)
+            self._roi_parameter_edit_timer.timeout.connect(self._finish_roi_parameter_edit)
+
         def _push_roi_undo(self):
             if self._restoring_roi_history or self.operation_mode != "Engineering":
                 return
@@ -491,6 +498,11 @@ class MainWindowStateMixin:
             self.roi_index_combo.blockSignals(False)
             self.on_active_roi_selection_changed()
 
+        def show_canvas_interaction_message(self, message: str):
+            if hasattr(self, "progress_stage_label"):
+                self.progress_stage_label.setText(f"当前阶段：{message}")
+            self._append_log(message)
+
         def handle_roi_context_action(self, mark_id: str, layer: str, roi_id: str, action: str):
             if self.operation_mode != "Engineering":
                 self._append_log("生产模式不允许修改 ROI，请先进入工程模式。")
@@ -526,7 +538,14 @@ class MainWindowStateMixin:
             if self._current_roi_entry() is None:
                 self._refresh_all_widgets()
                 return
-            self.apply_roi_params_to_current()
+            if not self._roi_parameter_edit_active:
+                self._push_roi_undo()
+                self._roi_parameter_edit_active = True
+            self.apply_roi_params_to_current(push_undo=False)
+            self._roi_parameter_edit_timer.start()
+
+        def _finish_roi_parameter_edit(self):
+            self._roi_parameter_edit_active = False
 
         def on_algorithm_parameter_edited(self, *args):
             if getattr(self, "_syncing_parameter_controls", False):
@@ -967,7 +986,7 @@ class MainWindowStateMixin:
                 self.polarity_combo.setEnabled(roi_type in {"Caliper Circle", "Approximate Line"})
             self._refresh_all_widgets()
 
-        def apply_roi_params_to_current(self):
+        def apply_roi_params_to_current(self, *, push_undo: bool = True):
             if self.operation_mode != "Engineering":
                 self._append_log("生产模式不允许修改 ROI，请先进入工程模式。")
                 return
@@ -980,7 +999,8 @@ class MainWindowStateMixin:
             roi = entry.roi if entry is not None else None
             if roi is None:
                 return
-            self._push_roi_undo()
+            if push_undo:
+                self._push_roi_undo()
             cx = self.center_x_spin.value()
             cy = self.center_y_spin.value()
             inner = max(0.0, self.inner_radius_spin.value())

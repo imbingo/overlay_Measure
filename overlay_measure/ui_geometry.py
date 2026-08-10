@@ -3,15 +3,20 @@ from __future__ import annotations
 from copy import deepcopy
 from typing import Optional
 
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
+    QDialog,
+    QDialogButtonBox,
     QDoubleSpinBox,
     QGridLayout,
     QGroupBox,
     QHBoxLayout,
     QInputDialog,
     QLabel,
+    QListWidget,
+    QListWidgetItem,
     QMessageBox,
     QPushButton,
     QVBoxLayout,
@@ -28,6 +33,73 @@ from .geometry_models import (
     GeometryRunResult,
 )
 from .ui_components import CollapsibleSection
+
+
+COORDINATE_METHOD_LABELS = {
+    "two_centers": "两圆心建轴",
+    "two_points": "两点建轴",
+    "point_line": "原点 + 直线轴",
+}
+
+
+class CoordinateSystemSelectorDialog(QDialog):
+    def __init__(self, coordinates, parent=None, preview_callback=None):
+        super().__init__(parent)
+        self.setWindowTitle("选择坐标系")
+        self.resize(560, 390)
+        self._coordinates = coordinates
+        self._preview_callback = preview_callback
+        layout = QVBoxLayout(self)
+        intro = QLabel("选择一项时，图像工作区会同步高亮对应坐标轴。")
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
+        self.list_widget = QListWidget()
+        for item in coordinates:
+            status = "有效" if item["valid"] else "无效"
+            row = QListWidgetItem(
+                f'{item["display_name"]}  ·  {item["layer_label"]}  ·  '
+                f'{item["method_label"]}  ·  {item["rotation_deg"]:.3f}°  ·  {status}'
+            )
+            row.setData(Qt.UserRole, item["coordinate_id"])
+            if not item["valid"]:
+                row.setForeground(Qt.gray)
+            self.list_widget.addItem(row)
+        self.details_label = QLabel()
+        self.details_label.setWordWrap(True)
+        self.details_label.setMinimumHeight(90)
+        self.details_label.setObjectName("statusCaption")
+        layout.addWidget(self.list_widget, 1)
+        layout.addWidget(self.details_label)
+        self.buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        self.buttons.accepted.connect(self.accept)
+        self.buttons.rejected.connect(self.reject)
+        layout.addWidget(self.buttons)
+        self.list_widget.currentRowChanged.connect(self._on_selection_changed)
+        if coordinates:
+            first_valid = next((index for index, item in enumerate(coordinates) if item["valid"]), 0)
+            self.list_widget.setCurrentRow(first_valid)
+
+    def _on_selection_changed(self, row: int):
+        item = self._coordinates[row] if 0 <= row < len(self._coordinates) else None
+        valid = bool(item and item["valid"])
+        self.buttons.button(QDialogButtonBox.Ok).setEnabled(valid)
+        if item is None:
+            self.details_label.clear()
+            return
+        origin = item["origin_text"]
+        references = item["references_text"] or "无"
+        error = f'\n失败原因：{item["error"]}' if item["error"] else ""
+        self.details_label.setText(
+            f'稳定编号：{item["coordinate_id"]}\n原点：{origin}\n引用要素：{references}{error}'
+        )
+        if self._preview_callback is not None:
+            self._preview_callback(item["coordinate_id"])
+
+    def selected_coordinate_id(self) -> str:
+        row = self.list_widget.currentRow()
+        if 0 <= row < len(self._coordinates) and self._coordinates[row]["valid"]:
+            return self._coordinates[row]["coordinate_id"]
+        return ""
 
 
 FEATURE_LABELS = {
@@ -162,6 +234,7 @@ class MainWindowGeometryMixin:
 
     def cancel_geometry_interaction(self):
         self._geometry_interaction = None
+        self._highlight_coordinate_system("")
         if hasattr(self, "geometry_hint_label"):
             self.geometry_hint_label.setText("当前操作已取消。选择工具后可重新建立要素或测量项目。")
         if hasattr(self, "geometry_active_tool_label"):
@@ -203,17 +276,65 @@ class MainWindowGeometryMixin:
         }[method]
         self._set_geometry_interaction("coordinate", 2, prompt, method=method)
 
+    def _coordinate_display_name(self, definition) -> str:
+        layer_label = "上层" if definition.layer == "upper" else "下层"
+        method_label = COORDINATE_METHOD_LABELS.get(definition.method, definition.method)
+        name = (definition.name or "").strip()
+        if not name or name == definition.coordinate_id:
+            return f"{definition.coordinate_id}（{layer_label} · {method_label} · {definition.rotation_deg:.3f}°）"
+        return f"{name} [{definition.coordinate_id}]"
+
+    def _highlight_coordinate_system(self, coordinate_id: str):
+        for canvas in (self.upper_canvas, self.lower_canvas):
+            canvas.set_coordinate_highlight(coordinate_id)
+
+    def _coordinate_selector_items(self, layer: str):
+        items = []
+        feature_names = {item.feature_id: item.name for item in self.geometry_program.features}
+        for definition in self.geometry_program.coordinate_systems:
+            if not definition.enabled or definition.layer != layer:
+                continue
+            result = self.geometry_result.coordinate_systems.get(definition.coordinate_id)
+            valid = result is not None and result.status == "Valid"
+            origin = getattr(result, "origin_px", None) if result is not None else None
+            origin_text = "未计算" if origin is None else f"({origin[0]:.3f}, {origin[1]:.3f}) px"
+            items.append({
+                "coordinate_id": definition.coordinate_id,
+                "display_name": self._coordinate_display_name(definition),
+                "layer_label": "上层" if layer == "upper" else "下层",
+                "method_label": COORDINATE_METHOD_LABELS.get(definition.method, definition.method),
+                "rotation_deg": float(definition.rotation_deg),
+                "origin_text": origin_text,
+                "references_text": "、".join(feature_names.get(ref, ref) for ref in definition.reference_ids),
+                "valid": valid,
+                "error": getattr(result, "error", "") if result is not None else "坐标系尚未计算",
+            })
+        return items
+
     def start_coordinate_label(self):
-        valid_coordinates = [item for item in self.geometry_program.coordinate_systems if item.enabled]
-        if not valid_coordinates:
+        self._refresh_geometry_results()
+        layer = self._geometry_layer()
+        coordinates = self._coordinate_selector_items(layer)
+        if not coordinates:
             QMessageBox.warning(self, "坐标标注", "请先建立坐标系。")
             return
-        names = [item.name for item in valid_coordinates]
-        selected, accepted = QInputDialog.getItem(self, "坐标标注", "选择坐标系", names, 0, False)
-        if not accepted:
+        dialog = CoordinateSystemSelectorDialog(coordinates, self, self._highlight_coordinate_system)
+        if dialog.exec() != QDialog.Accepted:
+            self._highlight_coordinate_system("")
             return
-        coordinate_id = valid_coordinates[names.index(selected)].coordinate_id
-        self._set_geometry_interaction("coordinate_label", 2, "先点击圆/点要素，再点击标注放置位置", coordinate_id=coordinate_id)
+        coordinate_id = dialog.selected_coordinate_id()
+        if not coordinate_id:
+            self._highlight_coordinate_system("")
+            QMessageBox.warning(self, "坐标标注", "所选坐标系无效，请检查其引用要素。")
+            return
+        self._highlight_coordinate_system(coordinate_id)
+        display_name = next(item["display_name"] for item in coordinates if item["coordinate_id"] == coordinate_id)
+        self._set_geometry_interaction(
+            "coordinate_label",
+            2,
+            f"当前坐标系：{display_name}。先点击圆/点要素，再点击标注放置位置",
+            coordinate_id=coordinate_id,
+        )
 
     def start_geometry_measurement(self, measurement_type: str):
         requirements = {
@@ -226,6 +347,35 @@ class MainWindowGeometryMixin:
         }
         count, prompt = requirements[measurement_type]
         self._set_geometry_interaction(f"measurement:{measurement_type}", count, prompt)
+
+    @staticmethod
+    def _required_pick_role(interaction: dict, click_index: int) -> str:
+        action = interaction.get("action", "")
+        if action == "measurement:center_distance" or action == "measurement:diameter":
+            return "circle"
+        if action == "coordinate" and interaction.get("method") == "two_centers":
+            return "circle"
+        if action == "feature:intersection":
+            return "line"
+        if action == "feature:projection" and click_index == 1:
+            return "line"
+        if action in {"measurement:line_angle", "measurement:two_line_angle"}:
+            return "line"
+        if action == "measurement:point_line_distance" and click_index == 1:
+            return "line"
+        if action == "coordinate" and interaction.get("method") == "point_line" and click_index == 1:
+            return "line"
+        return "point_or_center"
+
+    def _validate_geometry_pick(self, interaction: dict, click: dict) -> tuple[bool, str]:
+        role = self._required_pick_role(interaction, len(interaction.get("clicks", [])))
+        feature_type = str(click.get("feature_type", ""))
+        has_existing_feature = bool(click.get("feature_id") or click.get("detection_key"))
+        if role == "circle" and (not has_existing_feature or feature_type not in {"circle", "ellipse"}):
+            return False, "请点击已识别圆或椭圆的绿色轮廓；选中后会自动吸附到圆心。"
+        if role == "line" and (not has_existing_feature or feature_type != "line"):
+            return False, "请点击已识别或已建立的直线，当前点击未命中直线。"
+        return True, ""
 
     def _ensure_detection_feature(self, detection_key: str, layer: str) -> str:
         for item in self.geometry_program.features:
@@ -269,12 +419,18 @@ class MainWindowGeometryMixin:
         if layer != interaction["layer"]:
             self.geometry_hint_label.setText("请在开始操作时选择的同一图层完成全部点击。")
             return
+        valid, error = self._validate_geometry_pick(interaction, click)
+        if not valid:
+            self.geometry_hint_label.setText(error)
+            self.progress_stage_label.setText(f"当前阶段：{error}")
+            return
         interaction["clicks"].append(dict(click))
         self._refresh_geometry_canvas_context()
         current = len(interaction["clicks"])
         required = interaction["required"]
         if current < required:
-            self.geometry_hint_label.setText(f"已选择 {current}/{required}，请继续点击。")
+            snap_text = "，已吸附到轮廓中心" if click.get("snapped_to_center") else ""
+            self.geometry_hint_label.setText(f"已选择 {current}/{required}{snap_text}，请继续点击。")
             self.geometry_active_tool_label.setText(
                 self.geometry_active_tool_label.text().split("（", 1)[0] + f"（已选择 {current}/{required}）"
             )
@@ -355,9 +511,20 @@ class MainWindowGeometryMixin:
             if not accepted:
                 rotation = 0.0
             coordinate_id = self._next_geometry_id("CS")
+            layer_label = "上层" if layer == "upper" else "下层"
+            method_label = COORDINATE_METHOD_LABELS.get(interaction["method"], interaction["method"])
+            sequence = 1 + sum(
+                item.layer == layer and item.method == interaction["method"]
+                for item in self.geometry_program.coordinate_systems
+            )
+            default_name = f"{layer_label}-{method_label}-{sequence}"
+            coordinate_name, name_accepted = QInputDialog.getText(
+                self, "坐标系名称", "名称", text=default_name
+            )
+            coordinate_name = coordinate_name.strip() if name_accepted and coordinate_name.strip() else default_name
             self.geometry_program.coordinate_systems.append(
                 CoordinateSystemDefinition(
-                    coordinate_id, coordinate_id, layer, interaction["method"], references, rotation
+                    coordinate_id, coordinate_name, layer, interaction["method"], references, rotation
                 )
             )
             return
@@ -452,6 +619,24 @@ class MainWindowGeometryMixin:
                 feature.name, "上层" if feature.layer == "upper" else "下层", value, unit,
                 "有效" if feature.status == "Valid" else "无效", feature.quality,
                 feature.algorithm_path, feature.error,
+            ])
+        for definition in self.geometry_program.coordinate_systems:
+            coordinate = self.geometry_result.coordinate_systems.get(definition.coordinate_id)
+            status = coordinate.status if coordinate is not None else "Invalid"
+            origin = getattr(coordinate, "origin_px", None) if coordinate is not None else None
+            value = "" if origin is None else f"原点=({origin[0]:.3f}, {origin[1]:.3f})"
+            method = COORDINATE_METHOD_LABELS.get(definition.method, definition.method)
+            refs = "、".join(definition.reference_ids)
+            rows.append([
+                "坐标系",
+                self._coordinate_display_name(definition),
+                "上层" if definition.layer == "upper" else "下层",
+                value,
+                "px",
+                "有效" if status == "Valid" else "无效",
+                f"{method}，旋转 {definition.rotation_deg:.3f}°",
+                f"引用 {refs}",
+                getattr(coordinate, "error", "") if coordinate is not None else "坐标系尚未计算",
             ])
         for measurement in self.geometry_result.measurements.values():
             rows.append([

@@ -75,6 +75,19 @@ def _mouse_press(x: float, y: float) -> QMouseEvent:
     )
 
 
+def _mouse_release(x: float, y: float) -> QMouseEvent:
+    point = QPointF(float(x), float(y))
+    return QMouseEvent(
+        QEvent.MouseButtonRelease,
+        point,
+        point,
+        point,
+        Qt.LeftButton,
+        Qt.NoButton,
+        Qt.NoModifier,
+    )
+
+
 def _show_canvas() -> tuple[QApplication, ImageCanvas]:
     app = QApplication.instance() or QApplication([])
     canvas = ImageCanvas("卡尺显示测试", fixed_layer="upper")
@@ -132,10 +145,13 @@ def test_clicking_manual_fit_reveals_caliper_and_blank_click_hides_it():
 
     hit_x, hit_y = canvas.image_to_widget(84.0, 64.0)
     canvas.mousePressEvent(_mouse_press(hit_x, hit_y))
+    canvas.mouseReleaseEvent(_mouse_release(hit_x, hit_y))
     assert canvas._manual_caliper_selected("Mark1", "upper", detection)
     assert canvas._manual_roi_visible("Mark1", "upper", roi, detection)
 
-    canvas.mousePressEvent(_mouse_press(8.0, canvas.height() - 8.0))
+    blank_x, blank_y = canvas.image_to_widget(10.0, 10.0)
+    canvas.mousePressEvent(_mouse_press(blank_x, blank_y))
+    canvas.mouseReleaseEvent(_mouse_release(blank_x, blank_y))
     assert canvas.selected_caliper_feature is None
 
     canvas.close()

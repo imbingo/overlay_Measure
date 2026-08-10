@@ -1,5 +1,23 @@
 # Changelog
 
+## V2.2.4
+
+- Preserve zoom and pan when ROI selection refreshes the same image.
+- Snap measurement picks on detected circle and ellipse contours to their fitted centers.
+- Add numbered on-canvas pick feedback and stricter circle/line role validation.
+- Prevent center-distance, diameter and two-center coordinate tools from silently converting missed clicks into arbitrary points.
+
+## V2.2.3
+
+- Reworked manual ROI interaction into explicit select, move, resize, create and cancel states with fixed-screen-pixel hit targets and per-shape control handles.
+- Added transaction-style ROI editing: drag previews no longer rewrite Recipe data continuously, release commits once by stable ROI ID, and Esc restores the original ROI.
+- Constrained Circle, Annulus and Caliper Circle drawing to square bounds; added explicit feedback for undersized ROI drawing.
+- Added middle-button and Space+left canvas panning while reserving right-click for ROI and geometry management menus.
+- Added readable coordinate-system names, layer/method/rotation/origin/reference metadata, color-coded on-canvas axes and selection highlighting.
+- Replaced coordinate-label's ambiguous combo box with a preview selector that rejects invalid or cross-layer coordinate systems and explains invalid references.
+- Added deterministic 5 x 4 backlit 120 μm hole-array upper/lower images, ground truth, test Recipe and regeneration script under `sample_data/v2_2_3_hole_array/`.
+- Added V2.2.3 Qt offscreen ROI interaction, coordinate selector and sample-ground-truth regression tests.
+
 ## V2.2.2
 
 - Simplified manual ROI operation around the image canvas: dragging blank image space creates a new ROI, clicking an ROI selects it, and blank click or Esc clears selection.

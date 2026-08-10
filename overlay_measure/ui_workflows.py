@@ -915,6 +915,25 @@ class MainWindowWorkflowMixin:
             self._refresh_auto_selection_combos()
             self._refresh_all_widgets()
 
+        def commit_canvas_roi_edit(self, mark_id: str, layer: str, roi_id: str, roi: Roi):
+            if self.operation_mode != "Engineering" or self._calculation_running:
+                self._append_log("当前模式不允许修改 ROI。")
+                return
+            mark = self.marks.get(mark_id)
+            entry = mark.roi_entry(layer, roi_id) if mark is not None else None
+            if entry is None or roi is None:
+                self._append_log("ROI 编辑未提交：目标 ROI 已不存在。")
+                return
+            self._push_roi_undo()
+            entry.roi = roi.normalized()
+            entry.source = "manual"
+            self.roi_sources.setdefault(mark_id, {})[layer] = "manual"
+            self._recipe_roi_confirmation_signature = None
+            self._invalidate_manual_roi(mark_id, roi_id)
+            if mark_id == self._current_mark_id() and layer == self._current_layer():
+                self._refresh_roi_index_combo(roi_id)
+            self._refresh_all_widgets()
+
         def set_roi(self, mark_id: str, layer: str, roi: Roi, source: str = "manual"):
             if self.operation_mode != "Engineering":
                 self._append_log("生产模式不允许修改 ROI，请先进入工程模式。")

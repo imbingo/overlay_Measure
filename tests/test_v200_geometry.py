@@ -13,6 +13,7 @@ from overlay_measure.geometry_models import (
     GeometryMeasurementDefinition,
     GeometryProgram,
 )
+from overlay_measure import __version__
 from overlay_measure.models import DetectionParams, DetectionResult, MarkRecipe, MeasurementConfig
 from overlay_measure.recipe_manager import load_recipe, load_recipe_with_geometry, save_recipe
 from overlay_measure.ui_main import MainWindow
@@ -81,7 +82,7 @@ def test_v2_recipe_roundtrip_and_legacy_loader(tmp_path):
     assert loaded_program.features[0].name == "原点"
     data = json.loads(path.read_text(encoding="utf-8"))
     assert data["software_name"] == "SOMA Vision Metrology"
-    assert data["version"] == "2.2.2"
+    assert data["version"] == __version__
 
 
 def test_v2_ui_brand_tabs_and_measurement_command():

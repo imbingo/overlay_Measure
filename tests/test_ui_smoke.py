@@ -9,6 +9,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication, QLabel, QMessageBox
 
+from overlay_measure import __version__
 from overlay_measure.ui_main import MainWindow
 from overlay_measure.image_loader import load_image
 from overlay_measure.models import MarkRecipe
@@ -24,12 +25,12 @@ def test_main_window_algorithm_path_status_button_smoke(monkeypatch):
     window.show()
     app.processEvents()
 
-    assert "SOMA Vision Metrology V2.2.2" in window.windowTitle()
+    assert f"SOMA Vision Metrology V{__version__}" in window.windowTitle()
     assert not window.windowIcon().isNull()
     assert window.windowFlags() & Qt.FramelessWindowHint
     assert window.title_bar.height() == 46
     assert window.command_bar.objectName() == "commandBar"
-    assert window.version_label.text() == "V2.2.2"
+    assert window.version_label.text() == f"V{__version__}"
     assert window.batch_detail_combo.count() == 0
     assert window.batch_detail_bar.isHidden()
     assert window.operation_mode == "Production"
