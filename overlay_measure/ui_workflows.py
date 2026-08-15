@@ -717,6 +717,7 @@ class MainWindowWorkflowMixin:
                 return
             headers = ["Mark", "次数", "Dx(μm)", "Dy(μm)", "Dxy(μm)", "判定", "提示"]
             rows = []
+            row_payloads = []
             for mark_id in ("Mark1", "Mark2"):
                 overlays = self.batch_overlays.get(mark_id, [])
                 records = self.batch_run_records.get(mark_id, [])
@@ -732,6 +733,9 @@ class MainWindowWorkflowMixin:
                             RESULT_LABELS.get(overlay.result, overlay.result) if overlay else "异常",
                             overlay.warning if overlay else record.get("error", ""),
                         ])
+                        row_payloads.append({
+                            "kind": "batch_run", "run_index": record.get("run_index"),
+                        })
                 else:
                     for idx, overlay in enumerate(overlays, start=1):
                         rows.append([
@@ -743,6 +747,9 @@ class MainWindowWorkflowMixin:
                             RESULT_LABELS.get(overlay.result, overlay.result),
                             overlay.warning,
                         ])
+                        row_payloads.append({
+                            "kind": "batch_run", "run_index": idx,
+                        })
                 if overlays:
                     dxs = np.asarray([o.delta_x_um for o in overlays], dtype=float)
                     dys = np.asarray([o.delta_y_um for o in overlays], dtype=float)
@@ -765,7 +772,10 @@ class MainWindowWorkflowMixin:
                         "-",
                         "重复性统计",
                     ])
-            self._fill_table(self.repeat_table, headers, rows)
+                    row_payloads.append({
+                        "kind": "repeat_stat", "mark_id": mark_id, "deletable": False,
+                    })
+            self._fill_table(self.repeat_table, headers, rows, row_payloads)
 
         def _mean_overlay(self, mark_id: str, overlays: list[OverlayResult]) -> Optional[OverlayResult]:
             if not overlays:
@@ -1288,7 +1298,7 @@ class MainWindowWorkflowMixin:
             self._calculation_running = bool(running)
             self.progress_bar.setVisible(True)
             self.progress_stage_label.setVisible(True)
-            self.cancel_progress_btn.setVisible(True)
+            self.cancel_progress_btn.setVisible(running)
             self.cancel_progress_btn.setEnabled(running)
             if running:
                 self.progress_bar.setValue(0)
@@ -1299,12 +1309,23 @@ class MainWindowWorkflowMixin:
                 self.import_upper_btn, self.import_lower_btn, self.load_recipe_btn, self.recipe_manage_btn,
                 self.save_recipe_btn, self.analyze_all_btn, self.export_btn,
                 self.analyze_roi_btn, self.auto_detect_btn, self.reset_measurement_btn,
-                self.change_engineering_password_btn,
+                self.change_engineering_password_btn, self.import_images_btn, self.more_actions_btn,
             ):
                 button.setEnabled(not running)
+            self.import_upper_action.setEnabled(not running)
+            self.import_lower_action.setEnabled(not running and self._current_mode() == "Dual Image")
+            self.reset_measurement_action.setEnabled(not running)
+            self.fit_view_action.setEnabled(not running)
+            self.recipe_manage_action.setEnabled(not running and self.operation_mode == "Engineering")
+            self.save_recipe_action.setEnabled(not running and self.operation_mode == "Engineering")
             self.operation_mode_combo.setEnabled(not running)
             self.side_tabs.setEnabled(not running)
+            for table_name in ("det_table", "overlay_table", "geometry_table", "repeat_table"):
+                table = getattr(self, table_name, None)
+                if table is not None and hasattr(table, "set_delete_allowed"):
+                    table.set_delete_allowed(self.operation_mode == "Engineering" and not running)
             self._update_roi_edit_lock()
+            self._apply_operation_mode()
 
         def _production_preflight_errors(self) -> list[str]:
             errors: list[str] = []

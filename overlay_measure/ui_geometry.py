@@ -608,7 +608,8 @@ class MainWindowGeometryMixin:
     def _refresh_geometry_table(self):
         headers = ["类型", "编号", "层", "数值", "单位", "状态", "质量", "算法路径", "提示"]
         rows = []
-        for feature in self.geometry_result.features.values():
+        row_payloads = []
+        for feature_id, feature in self.geometry_result.features.items():
             value = ""
             unit = ""
             if feature.radius_px is not None:
@@ -620,6 +621,7 @@ class MainWindowGeometryMixin:
                 "有效" if feature.status == "Valid" else "无效", feature.quality,
                 feature.algorithm_path, feature.error,
             ])
+            row_payloads.append({"kind": "geometry", "geometry_kind": "feature", "stable_id": feature_id})
         for definition in self.geometry_program.coordinate_systems:
             coordinate = self.geometry_result.coordinate_systems.get(definition.coordinate_id)
             status = coordinate.status if coordinate is not None else "Invalid"
@@ -638,20 +640,89 @@ class MainWindowGeometryMixin:
                 f"引用 {refs}",
                 getattr(coordinate, "error", "") if coordinate is not None else "坐标系尚未计算",
             ])
-        for measurement in self.geometry_result.measurements.values():
+            row_payloads.append({
+                "kind": "geometry", "geometry_kind": "coordinate_system",
+                "stable_id": definition.coordinate_id,
+            })
+        for measurement_id, measurement in self.geometry_result.measurements.items():
             rows.append([
                 "测量", measurement.name, "上层" if measurement.layer == "upper" else "下层",
                 "" if measurement.value is None else f"{measurement.value:.3f}", measurement.unit,
                 "有效" if measurement.status == "Valid" else "无效", measurement.quality,
                 measurement.algorithm_path, measurement.error,
             ])
-        for label in self.geometry_result.coordinate_labels.values():
+            row_payloads.append({
+                "kind": "geometry", "geometry_kind": "measurement", "stable_id": measurement_id,
+            })
+        for label_id, label in self.geometry_result.coordinate_labels.items():
             value = "" if label.x_um is None else f"X={label.x_um:.3f}, Y={label.y_um:.3f}"
             rows.append([
                 "坐标标注", label.name, "上层" if label.layer == "upper" else "下层",
                 value, "μm", "有效" if label.status == "Valid" else "无效", "", "自定义坐标系", label.error,
             ])
-        self._fill_table(self.geometry_table, headers, rows)
+            row_payloads.append({
+                "kind": "geometry", "geometry_kind": "coordinate_label", "stable_id": label_id,
+            })
+        self._fill_table(self.geometry_table, headers, rows, row_payloads)
+
+    def delete_geometry_results(self, payloads: list[dict]):
+        feature_ids = {
+            item.get("stable_id") for item in payloads
+            if item.get("geometry_kind") == "feature" and item.get("stable_id")
+        }
+        coordinate_ids = {
+            item.get("stable_id") for item in payloads
+            if item.get("geometry_kind") == "coordinate_system" and item.get("stable_id")
+        }
+        measurement_ids = {
+            item.get("stable_id") for item in payloads
+            if item.get("geometry_kind") == "measurement" and item.get("stable_id")
+        }
+        label_ids = {
+            item.get("stable_id") for item in payloads
+            if item.get("geometry_kind") == "coordinate_label" and item.get("stable_id")
+        }
+
+        changed = True
+        while changed:
+            changed = False
+            for definition in self.geometry_program.features:
+                if definition.feature_id not in feature_ids and feature_ids.intersection(definition.reference_ids):
+                    feature_ids.add(definition.feature_id)
+                    changed = True
+        for definition in self.geometry_program.coordinate_systems:
+            if feature_ids.intersection(definition.reference_ids):
+                coordinate_ids.add(definition.coordinate_id)
+        for definition in self.geometry_program.measurements:
+            if feature_ids.intersection(definition.reference_ids) or definition.coordinate_id in coordinate_ids:
+                measurement_ids.add(definition.measurement_id)
+        for definition in self.geometry_program.coordinate_labels:
+            if definition.feature_id in feature_ids or definition.coordinate_id in coordinate_ids:
+                label_ids.add(definition.label_id)
+
+        self.geometry_program.features = [
+            item for item in self.geometry_program.features if item.feature_id not in feature_ids
+        ]
+        self.geometry_program.coordinate_systems = [
+            item for item in self.geometry_program.coordinate_systems if item.coordinate_id not in coordinate_ids
+        ]
+        self.geometry_program.measurements = [
+            item for item in self.geometry_program.measurements if item.measurement_id not in measurement_ids
+        ]
+        self.geometry_program.coordinate_labels = [
+            item for item in self.geometry_program.coordinate_labels if item.label_id not in label_ids
+        ]
+
+        for result in [self.geometry_result, *self.batch_geometry_results]:
+            for identifier in feature_ids:
+                result.features.pop(identifier, None)
+            for identifier in coordinate_ids:
+                result.coordinate_systems.pop(identifier, None)
+            for identifier in measurement_ids:
+                result.measurements.pop(identifier, None)
+            for identifier in label_ids:
+                result.coordinate_labels.pop(identifier, None)
+        self._refresh_geometry_results()
 
     def delete_selected_geometry_item(self):
         if not hasattr(self, "geometry_table") or self.geometry_table.currentRow() < 0:

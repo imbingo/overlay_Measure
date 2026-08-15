@@ -160,10 +160,26 @@ class MainWindowStateMixin:
             if not hasattr(self, "side_tabs"):
                 return
             engineering = self.operation_mode == "Engineering"
+            self.recipe_manage_btn.setVisible(True)
+            self.save_recipe_btn.setVisible(True)
+            self.recipe_manage_action.setVisible(False)
+            self.save_recipe_action.setVisible(False)
+            self.image_mode_label.setVisible(True)
+            self.mode_combo.setVisible(True)
+            self.display_enhance_check.setVisible(True)
+            self.analyze_roi_btn.setVisible(True)
+            self.import_upper_btn.setVisible(True)
+            self.import_lower_btn.setVisible(True)
+            self.reset_measurement_btn.setVisible(True)
             self.side_tabs.setTabEnabled(2, engineering)
             self.side_tabs.setTabEnabled(3, engineering)
             self.side_tabs.setTabEnabled(4, engineering)
             self.save_recipe_btn.setEnabled(engineering and not self._calculation_running)
+            self.recipe_manage_action.setEnabled(engineering and not self._calculation_running)
+            self.save_recipe_action.setEnabled(engineering and not self._calculation_running)
+            self.analyze_roi_btn.setEnabled(
+                not self._calculation_running and not self._is_auto_workflow()
+            )
             self.diagnostic_check.setEnabled(engineering)
             self.change_engineering_password_btn.setEnabled(engineering and not self._calculation_running)
             for widget in (
@@ -187,6 +203,10 @@ class MainWindowStateMixin:
                 "工程模式：允许修改 ROI、算法参数和配方。" if engineering
                 else "生产模式：配方与算法参数已锁定。切换工程模式需要密码。"
             )
+            for table_name in ("det_table", "overlay_table", "geometry_table", "repeat_table"):
+                table = getattr(self, table_name, None)
+                if table is not None and hasattr(table, "set_delete_allowed"):
+                    table.set_delete_allowed(engineering and not self._calculation_running)
             self._update_roi_edit_lock()
 
         def _update_roi_edit_lock(self):
@@ -1154,6 +1174,9 @@ class MainWindowStateMixin:
             if hasattr(self, "lower_image_card"):
                 self.lower_image_card.setVisible(is_dual)
             self.import_lower_btn.setEnabled(is_dual)
+            if hasattr(self, "import_upper_action"):
+                self.import_upper_action.setEnabled(not self._calculation_running)
+                self.import_lower_action.setEnabled(is_dual and not self._calculation_running)
             self.auto_detect_btn.setEnabled(show_auto)
             # 基准/待测轮廓选择在自动识别和手动 ROI 两种工作方式下都需要可用。
             self.auto_reference_combo.setEnabled(True)
@@ -1163,7 +1186,7 @@ class MainWindowStateMixin:
             self.auto_calculate_btn.setEnabled(
                 bool(auto_reference) and bool(auto_target) and auto_reference != auto_target
             )
-            self.analyze_roi_btn.setEnabled(not show_auto)
+            self.analyze_roi_btn.setEnabled(not show_auto and not self._calculation_running)
             self.analyze_current_btn.setEnabled(not show_auto)
             if self._is_batch_mode():
                 run_errors = validate_batch_pairing(self.batch_images, is_dual)
@@ -1304,6 +1327,7 @@ class MainWindowStateMixin:
                                 for layer, item in layer_map.items():
                                     entries.append({
                                         "run_index": record.get("run_index"), "mark_id": display_id,
+                                        "source_mark_id": mark_id, "candidate_label": label,
                                         "layer": layer, "detection": item,
                                         "upper_file": record.get("upper_file", ""),
                                         "lower_file": record.get("lower_file", ""), "error": record.get("error", ""),
@@ -1312,6 +1336,7 @@ class MainWindowStateMixin:
                             for roi_id, item in detections.items():
                                 entries.append({
                                     "run_index": record.get("run_index"), "mark_id": mark_id,
+                                    "source_mark_id": mark_id,
                                     "layer": item.layer, "roi_id": roi_id, "detection": item,
                                     "upper_file": record.get("upper_file", ""),
                                     "lower_file": record.get("lower_file", ""), "error": record.get("error", ""),
@@ -1319,6 +1344,7 @@ class MainWindowStateMixin:
                         if not detections:
                             entries.append({
                                 "run_index": record.get("run_index"), "mark_id": mark_id,
+                                "source_mark_id": mark_id,
                                 "layer": "", "detection": None,
                                 "upper_file": record.get("upper_file", ""),
                                 "lower_file": record.get("lower_file", ""),
@@ -1326,13 +1352,25 @@ class MainWindowStateMixin:
                             })
                 return entries
             entries = []
-            for mark_id, layer_map in self._display_detections().items():
-                for roi_id, detection in layer_map.items():
-                    entries.append({
-                        "run_index": None, "mark_id": mark_id, "layer": detection.layer,
-                        "roi_id": roi_id,
-                        "detection": detection, "upper_file": "", "lower_file": "", "error": "",
-                    })
+            if self._is_auto_workflow():
+                for mark_id, detected in self.auto_detections_by_mark.items():
+                    for label, layer_map in detected.items():
+                        detection = next(iter(layer_map.values()), None)
+                        display_id = f"{mark_id}-{candidate_display_label(label, detection)}"
+                        for layer, item in layer_map.items():
+                            entries.append({
+                                "run_index": None, "mark_id": display_id, "source_mark_id": mark_id,
+                                "candidate_label": label, "layer": layer, "detection": item,
+                                "upper_file": "", "lower_file": "", "error": "",
+                            })
+            else:
+                for mark_id, roi_map in self._current_manual_detection_map().items():
+                    for roi_id, detection in roi_map.items():
+                        entries.append({
+                            "run_index": None, "mark_id": mark_id, "source_mark_id": mark_id,
+                            "layer": detection.layer, "roi_id": roi_id,
+                            "detection": detection, "upper_file": "", "lower_file": "", "error": "",
+                        })
             return entries
 
         def _display_overlays(self):
@@ -1485,6 +1523,7 @@ class MainWindowStateMixin:
             ]
             det_headers.insert(4, "ROI编号")
             det_rows = []
+            det_payloads = []
             manual_labels = self._manual_detection_labels()
             for entry in self._display_detection_entries():
                     mark_id = entry["mark_id"]
@@ -1500,6 +1539,9 @@ class MainWindowStateMixin:
                             run_text, file_text, mark_id, "", "", "", "", "", "", "", "", "", "",
                             "异常", quality_profile_display(self.config), "未评估", "", "", "", "", entry.get("error", ""),
                         ])
+                        det_payloads.append({
+                            "kind": "batch_run", "run_index": entry.get("run_index"),
+                        })
                         continue
                     if d.fitting_mode == "Rectangle":
                         width_um, height_um = rotated_rect_size_um(
@@ -1617,13 +1659,28 @@ class MainWindowStateMixin:
                         d.shape_params.get("algorithm_path", describe_algorithm_path(d, "Auto" if self._is_auto_workflow() else "Manual")),
                         d.warning or entry.get("error", ""),
                     ])
-            self._fill_table(self.det_table, det_headers, det_rows)
+                    if entry.get("run_index"):
+                        det_payloads.append({
+                            "kind": "batch_run", "run_index": entry.get("run_index"),
+                        })
+                    elif self._is_auto_workflow():
+                        det_payloads.append({
+                            "kind": "auto_detection", "mark_id": entry.get("source_mark_id", mark_id),
+                            "candidate_label": entry.get("candidate_label", ""), "layer": layer,
+                        })
+                    else:
+                        det_payloads.append({
+                            "kind": "manual_detection", "mark_id": entry.get("source_mark_id", mark_id),
+                            "roi_id": roi_id, "layer": layer,
+                        })
+            self._fill_table(self.det_table, det_headers, det_rows, det_payloads)
             roundness_header = self.det_table.horizontalHeaderItem(8)
             if roundness_header is not None:
                 roundness_header.setToolTip("椭圆圆度=(物理长轴-物理短轴)/2；非 ISO 最小区域圆度")
 
             ov_headers = ["项目", "Dx/Dy/Dxy/Rz", "数值", "判定", "质量门槛", "实际质量", "质量详情", "提示"]
             ov_rows = []
+            ov_payloads = []
             display_overlays = self._display_overlays()
             for row in self._build_summary_rows():
                 project = row.get("项目", "")
@@ -1646,12 +1703,155 @@ class MainWindowStateMixin:
                         quality_summary,
                         note,
                     ])
+                    ov_payloads.append({
+                        "kind": "overlay", "mark_id": project,
+                        "workflow": "Auto" if self._is_auto_workflow() else "Manual",
+                        "deletable": project in {"Mark1", "Mark2"},
+                    })
                 if project == "Rz":
                     ov_rows[-1][7] = f"{row.get('公式', '')}；L={row.get('L(μm)', '')}；{note}".strip("；")
-            self._fill_table(self.overlay_table, ov_headers, ov_rows)
+            self._fill_table(self.overlay_table, ov_headers, ov_rows, ov_payloads)
 
-        def _fill_table(self, table: QTableWidget, headers, rows):
-            signature = (tuple(headers), tuple(tuple(str(value) for value in row) for row in rows))
+        def _delete_result_rows(self, payloads):
+            if self.operation_mode != "Engineering":
+                QMessageBox.information(self, "删除结果", "仅工程模式允许删除测量结果。")
+                return
+            payloads = [dict(item) for item in payloads if item and item.get("deletable", True)]
+            if not payloads:
+                return
+            unique = []
+            seen = set()
+            for payload in payloads:
+                identity = tuple(sorted((str(key), repr(value)) for key, value in payload.items()))
+                if identity not in seen:
+                    seen.add(identity)
+                    unique.append(payload)
+            answer = QMessageBox.question(
+                self,
+                "删除测量结果",
+                f"确定删除选中的 {len(unique)} 项结果吗？\n"
+                "相关对位、几何结果及批量统计会同步更新；原始图像和 ROI 不会删除。",
+            )
+            if answer != QMessageBox.Yes:
+                return
+
+            batch_indexes = {
+                int(item["run_index"]) for item in unique
+                if item.get("kind") == "batch_run" and item.get("run_index") not in (None, "")
+            }
+            if batch_indexes:
+                self._delete_batch_result_runs(batch_indexes)
+
+            geometry_payloads = [item for item in unique if item.get("kind") == "geometry"]
+            if geometry_payloads:
+                self.delete_geometry_results(geometry_payloads)
+
+            for item in unique:
+                kind = item.get("kind")
+                if kind in {"batch_run", "geometry"}:
+                    continue
+                if kind == "manual_detection":
+                    mark_id = str(item.get("mark_id", ""))
+                    roi_id = str(item.get("roi_id", ""))
+                    if mark_id and roi_id:
+                        self._invalidate_manual_roi(mark_id, roi_id, remove_selection=True)
+                elif kind == "auto_detection":
+                    self._delete_auto_detection_result(item)
+                elif kind == "overlay":
+                    mark_id = str(item.get("mark_id", ""))
+                    if mark_id in {"Mark1", "Mark2"}:
+                        if item.get("workflow") == "Auto":
+                            self.auto_overlays.pop(mark_id, None)
+                        else:
+                            self.overlays.pop(mark_id, None)
+
+            self._refresh_batch_detail_selector()
+            self._sync_current_mark_images()
+            self._refresh_auto_selection_combos()
+            self._refresh_all_widgets()
+            self._append_log(f"已删除 {len(unique)} 项测量结果，并同步更新关联结果与导出数据。")
+
+        def _delete_auto_detection_result(self, payload: dict):
+            mark_id = str(payload.get("mark_id", ""))
+            label = str(payload.get("candidate_label", ""))
+            if not mark_id or not label:
+                return
+            self.auto_detections_by_mark.setdefault(mark_id, {}).pop(label, None)
+            self.auto_candidates_by_mark.setdefault(mark_id, {}).pop(label, None)
+            selection = self.auto_selections.setdefault(mark_id, {"reference_label": "", "target_label": ""})
+            changed = False
+            for key in ("reference_label", "target_label"):
+                if selection.get(key) == label:
+                    selection[key] = ""
+                    changed = True
+            mark = self.marks.get(mark_id)
+            if mark is not None:
+                if mark.reference_contour_id == label:
+                    mark.reference_contour_id = ""
+                    changed = True
+                if mark.target_contour_id == label:
+                    mark.target_contour_id = ""
+                    changed = True
+            self.auto_overlays.pop(mark_id, None)
+            if changed:
+                self._append_log("所选自动轮廓已删除，请重新选择基准轮廓和待测轮廓。")
+
+        def _delete_batch_result_runs(self, run_indexes: set[int]):
+            for mark_id in ("Mark1", "Mark2"):
+                for layer in ("upper", "lower"):
+                    images = self.batch_images.get(mark_id, {}).get(layer, [])
+                    if images:
+                        self.batch_images[mark_id][layer] = [
+                            image for index, image in enumerate(images, start=1)
+                            if index not in run_indexes
+                        ]
+            old_geometry = list(self.batch_geometry_results)
+            self.batch_geometry_results = [
+                result for index, result in enumerate(old_geometry, start=1)
+                if index not in run_indexes
+            ]
+            for mark_id in ("Mark1", "Mark2"):
+                records = list(self.batch_run_records.get(mark_id, []))
+                if records:
+                    records = [
+                        record for record in records
+                        if int(record.get("run_index", 0) or 0) not in run_indexes
+                    ]
+                    for new_index, record in enumerate(records, start=1):
+                        record["run_index"] = new_index
+                    self.batch_run_records[mark_id] = records
+                    valid_overlays = [
+                        record["overlay"] for record in records
+                        if record.get("overlay") is not None and record["overlay"].result != "Invalid"
+                    ]
+                else:
+                    valid_overlays = [
+                        overlay for index, overlay in enumerate(self.batch_overlays.get(mark_id, []), start=1)
+                        if index not in run_indexes
+                    ]
+                self.batch_overlays[mark_id] = valid_overlays
+                self.overlays.pop(mark_id, None)
+                self.auto_overlays.pop(mark_id, None)
+                if valid_overlays:
+                    target = self.auto_overlays if self._is_auto_workflow() else self.overlays
+                    target[mark_id] = self._mean_overlay(mark_id, valid_overlays)
+
+            maximum = max((len(records) for records in self.batch_run_records.values()), default=0)
+            if maximum:
+                self._batch_detail_last_single_index = min(self._batch_detail_last_single_index, maximum)
+                if isinstance(self._batch_detail_run_index, int):
+                    self._batch_detail_run_index = min(self._batch_detail_run_index, maximum)
+            else:
+                self._batch_detail_run_index = 1
+                self._batch_detail_last_single_index = 1
+
+        def _fill_table(self, table: QTableWidget, headers, rows, row_payloads=None):
+            row_payloads = list(row_payloads or ({} for _ in rows))
+            signature = (
+                tuple(headers),
+                tuple(tuple(str(value) for value in row) for row in rows),
+                tuple(repr(payload) for payload in row_payloads),
+            )
             if getattr(table, "_content_signature", None) == signature:
                 return
             table._content_signature = signature
@@ -1682,7 +1882,19 @@ class MainWindowStateMixin:
                         item.setBackground(QColor(226, 244, 232))
                         item.setForeground(QColor(25, 107, 58))
                     table.setItem(r, c, item)
-            table.resizeColumnsToContents()
+            if hasattr(table, "fit_result_columns"):
+                table.fit_result_columns()
+            else:
+                table.resizeColumnsToContents()
+            table.horizontalHeader().setStretchLastSection(False)
+            table.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+            table.setHorizontalScrollMode(QTableWidget.ScrollPerPixel)
+            if hasattr(table, "_sync_external_scroll_range"):
+                table._sync_external_scroll_range(
+                    table.horizontalScrollBar().minimum(), table.horizontalScrollBar().maximum()
+                )
+            if hasattr(table, "set_row_payloads"):
+                table.set_row_payloads(row_payloads)
             table.setUpdatesEnabled(True)
             table.setSortingEnabled(sorting)
 

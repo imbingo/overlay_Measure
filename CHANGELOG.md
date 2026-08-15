@@ -1,5 +1,18 @@
 # Changelog
 
+## V2.2.6
+
+- Preserved the V2.2.4 command-bar layout and button styling after UI review.
+- Added result-table multi-selection, batch copy, Engineering-only deletion and an explicit synchronized horizontal scrollbar.
+- Show the compact cancel action only while a calculation is running and place it beside progress.
+
+## V2.2.5
+
+- Added consistent Ctrl/Shift multi-selection and TSV clipboard copy, including an optional header row, across all result tables.
+- Restored an always-visible horizontal scrollbar rail, full-text column sizing, per-pixel scrolling and Shift-wheel support without replacing the existing table layout.
+- Added Engineering-only context-menu deletion backed by stable row identities; Production mode remains read-only.
+- Batch deletion now excludes complete runs and recomputes mean, 3σ, PV and export data; dependent overlay and geometry results are invalidated consistently.
+
 ## V2.2.4
 
 - Preserve zoom and pan when ROI selection refreshes the same image.

@@ -67,6 +67,7 @@ from .quality_profiles import (
     quality_profile_display,
     quality_profile_is_modified,
 )
+from .result_table import ResultTableWidget
 from .recipe_manager import load_recipe, save_recipe
 from .recipe_library import RecipeLibrary, RecipeLibraryEntry
 from .recipe_integrity import seal_recipe, verify_recipe
@@ -110,6 +111,7 @@ class MainWindowBuilderMixin:
                 QFrame#summaryCard, QFrame#imageCard, QFrame#tableCard { background: #FFFFFF; border: 1px solid #DEE3E9; border-radius: 7px; }
                 QWidget#metricCell { background: transparent; border: none; }
                 QGroupBox, QTableWidget, QPlainTextEdit { background: #FFFFFF; border: 1px solid #D8DEE6; border-radius: 7px; margin-top: 8px; padding-top: 8px; }
+                QTableWidget#resultTable { margin-top: 0px; padding-top: 0px; border-radius: 5px; }
                 QPlainTextEdit { padding: 8px; color: #20242B; font-family: "Microsoft YaHei UI"; font-size: 12px; }
                 QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 0 4px; color: #20242B; font-weight: 600; }
                 QPushButton { background: #FFFFFF; border: 1px solid #D6DCE4; border-radius: 6px; padding: 7px 12px; min-height: 20px; }
@@ -117,6 +119,11 @@ class MainWindowBuilderMixin:
                 QPushButton:pressed { background: #EEF2F6; }
                 QPushButton#primaryButton { background: #087EF4; color: #FFFFFF; border-color: #087EF4; font-weight: 600; padding-left: 18px; padding-right: 18px; }
                 QPushButton#primaryButton:hover { background: #006DDB; border-color: #006DDB; }
+                QPushButton#commandAction, QToolButton#commandAction { background: #FFFFFF; border: 1px solid #D6DCE4; border-radius: 6px; padding: 6px 10px; font-weight: 500; }
+                QPushButton#commandAction:hover, QToolButton#commandAction:hover { background: #F7F9FB; border-color: #B9C2CE; }
+                QToolButton#commandMore { background: #FFFFFF; border: 1px solid #D6DCE4; border-radius: 6px; padding: 6px 9px; }
+                QToolButton#commandMore:hover { background: #F7F9FB; border-color: #B9C2CE; }
+                QPushButton#statusCancelButton { background: #FFFFFF; border: 1px solid #D6DCE4; border-radius: 5px; padding: 2px 9px; min-height: 0; font-size: 11px; }
                 QPushButton#titleAction { border: none; background: transparent; padding: 5px 10px; min-height: 22px; }
                 QPushButton#titleAction:hover { background: #F2F5F8; }
                 QPushButton#recipeSwitcher { background: #F7F9FB; border: 1px solid #DCE2E9; border-radius: 7px; padding: 6px 12px; text-align: left; min-width: 190px; }
@@ -236,6 +243,7 @@ class MainWindowBuilderMixin:
             self.mode_combo = QComboBox()
             self.mode_combo.addItems(["单图模式", "双图模式"])
             self.mode_combo.setMinimumWidth(108)
+            self.image_mode_label = QLabel("图像模式")
             self.display_enhance_check = QCheckBox("显示增强")
             self.display_enhance_check.setChecked(False)
             self.reset_measurement_btn = QPushButton("重置")
@@ -257,7 +265,34 @@ class MainWindowBuilderMixin:
             self.image_status_label.setObjectName("statusCaption")
             self.image_status_label.setVisible(False)
 
-            command_layout.addWidget(QLabel("图像模式"))
+            self.import_images_btn = QToolButton()
+            self.import_images_btn.setText("导入图像")
+            self.import_images_btn.setIcon(self.style().standardIcon(QStyle.SP_DialogOpenButton))
+            self.import_images_btn.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+            self.import_images_btn.setPopupMode(QToolButton.InstantPopup)
+            self.import_images_btn.setToolTip("导入单图、上层图像或下层图像")
+            self.import_images_menu = QMenu(self.import_images_btn)
+            self.import_upper_action = self.import_images_menu.addAction("导入上层/单图")
+            self.import_lower_action = self.import_images_menu.addAction("导入下层图像")
+            self.import_images_btn.setMenu(self.import_images_menu)
+
+            self.more_actions_btn = QToolButton()
+            self.more_actions_btn.setText("更多")
+            self.more_actions_btn.setPopupMode(QToolButton.InstantPopup)
+            self.more_actions_btn.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+            self.more_actions_btn.setToolTip("显示与测量会话操作")
+            self.more_actions_menu = QMenu(self.more_actions_btn)
+            self.recipe_manage_action = self.more_actions_menu.addAction("配方管理")
+            self.save_recipe_action = self.more_actions_menu.addAction("保存当前配方")
+            self.more_actions_menu.addSeparator()
+            self.display_enhance_action = self.more_actions_menu.addAction("显示增强")
+            self.display_enhance_action.setCheckable(True)
+            self.fit_view_action = self.more_actions_menu.addAction("适应窗口")
+            self.more_actions_menu.addSeparator()
+            self.reset_measurement_action = self.more_actions_menu.addAction("重置测量")
+            self.more_actions_btn.setMenu(self.more_actions_menu)
+
+            command_layout.addWidget(self.image_mode_label)
             command_layout.addWidget(self.mode_combo)
             command_layout.addWidget(self.display_enhance_check)
             command_layout.addWidget(self.import_upper_btn)
@@ -326,31 +361,38 @@ class MainWindowBuilderMixin:
             batch_detail_layout.addStretch(1)
             self.batch_detail_bar.setVisible(False)
             detail_tab_layout.addWidget(self.batch_detail_bar)
-            self.det_table = QTableWidget()
+            self.det_table = ResultTableWidget()
             self.det_table.setMinimumHeight(300)
             detail_tab_layout.addWidget(self.det_table)
+            detail_tab_layout.addWidget(self.det_table.external_horizontal_bar)
 
             overlay_tab = QWidget()
             overlay_tab_layout = QVBoxLayout(overlay_tab)
             overlay_tab_layout.setContentsMargins(0, 0, 0, 0)
-            self.overlay_table = QTableWidget()
+            self.overlay_table = ResultTableWidget()
             self.overlay_table.setMinimumHeight(300)
             overlay_tab_layout.addWidget(self.overlay_table)
+            overlay_tab_layout.addWidget(self.overlay_table.external_horizontal_bar)
 
             repeat_tab = QWidget()
             repeat_layout = QVBoxLayout(repeat_tab)
             repeat_layout.setContentsMargins(0, 0, 0, 0)
             repeat_layout.setSpacing(8)
-            self.repeat_table = QTableWidget()
+            self.repeat_table = ResultTableWidget()
             self.repeat_table.setMinimumHeight(300)
             repeat_layout.addWidget(self.repeat_table, stretch=1)
+            repeat_layout.addWidget(self.repeat_table.external_horizontal_bar)
 
             geometry_tab = QWidget()
             geometry_layout = QVBoxLayout(geometry_tab)
             geometry_layout.setContentsMargins(0, 0, 0, 0)
-            self.geometry_table = QTableWidget()
+            self.geometry_table = ResultTableWidget()
             self.geometry_table.setMinimumHeight(300)
             geometry_layout.addWidget(self.geometry_table)
+            geometry_layout.addWidget(self.geometry_table.external_horizontal_bar)
+
+            for table in (self.det_table, self.overlay_table, self.geometry_table, self.repeat_table):
+                table.deleteRequested.connect(self._delete_result_rows)
 
             self.result_tabs.addTab(detail_tab, "识别明细")
             self.result_tabs.addTab(overlay_tab, "对位结果")
@@ -384,7 +426,9 @@ class MainWindowBuilderMixin:
 
         def _install_progress_status_widgets(self):
             self.statusBar().setSizeGripEnabled(False)
+            self.statusBar().setMinimumHeight(34)
             self.status_shell = QWidget()
+            self.status_shell.setMinimumHeight(30)
             self.status_shell_layout = QHBoxLayout(self.status_shell)
             self.status_shell_layout.setContentsMargins(10, 2, 10, 2)
             self.status_shell_layout.setSpacing(10)
@@ -412,16 +456,20 @@ class MainWindowBuilderMixin:
             self.progress_bar.setVisible(True)
             self.status_shell_layout.addWidget(self.progress_bar)
 
+            self.cancel_progress_btn = QPushButton("取消计算")
+            self.cancel_progress_btn.setObjectName("statusCancelButton")
+            self.cancel_progress_btn.setFixedSize(76, 20)
+            self.cancel_progress_btn.setVisible(False)
+            self.cancel_progress_btn.setEnabled(False)
+            self.cancel_progress_btn.clicked.connect(self.cancel_calculation)
+            self.status_shell_layout.addWidget(self.cancel_progress_btn, 0, Qt.AlignVCenter)
+
             self.progress_stage_label = QLabel("当前阶段：等待导入图像")
             self.progress_stage_label.setObjectName("statusCaption")
             self.progress_stage_label.setMinimumWidth(170)
             self.progress_stage_label.setVisible(True)
             self.status_shell_layout.addWidget(self.progress_stage_label)
             self.status_shell_layout.addStretch(1)
-            self.cancel_progress_btn = QPushButton("取消计算")
-            self.cancel_progress_btn.setVisible(True)
-            self.cancel_progress_btn.setEnabled(False)
-            self.cancel_progress_btn.clicked.connect(self.cancel_calculation)
             self.statusBar().addPermanentWidget(self.status_shell, 1)
 
         def _install_algorithm_path_status_button(self):
@@ -437,7 +485,6 @@ class MainWindowBuilderMixin:
             self.algorithm_path_button.setToolTip(self.algorithm_path_text)
             self.status_shell_layout.addWidget(self.algorithm_path_summary_label)
             self.status_shell_layout.addWidget(self.algorithm_path_button)
-            self.status_shell_layout.addWidget(self.cancel_progress_btn)
 
         def _build_image_card(self, title: str, layer: str, canvas: ImageCanvas) -> QWidget:
             # V1.2：去掉图像区顶部的大标题条，减少占用空间，保留画布本身。
@@ -992,9 +1039,17 @@ class MainWindowBuilderMixin:
             self.change_engineering_password_btn.clicked.connect(self.change_engineering_password)
             self.import_upper_btn.clicked.connect(self.import_upper_image)
             self.import_lower_btn.clicked.connect(self.import_lower_image)
+            self.import_upper_action.triggered.connect(lambda checked=False: self.import_upper_image())
+            self.import_lower_action.triggered.connect(lambda checked=False: self.import_lower_image())
+            self.recipe_manage_action.triggered.connect(lambda checked=False: self.show_recipe_manager())
+            self.save_recipe_action.triggered.connect(lambda checked=False: self.save_recipe_file())
             self.mode_combo.currentTextChanged.connect(self.on_mode_changed)
             self.display_enhance_check.toggled.connect(self.on_display_enhancement_changed)
+            self.display_enhance_check.toggled.connect(self.display_enhance_action.setChecked)
+            self.display_enhance_action.toggled.connect(self.display_enhance_check.setChecked)
             self.reset_measurement_btn.clicked.connect(self.reset_measurement)
+            self.reset_measurement_action.triggered.connect(lambda checked=False: self.reset_measurement())
+            self.fit_view_action.triggered.connect(lambda checked=False: self.reset_canvas_views())
             self.zoom_in_btn.clicked.connect(lambda: self.zoom_canvases(1.25))
             self.zoom_out_btn.clicked.connect(lambda: self.zoom_canvases(0.8))
             self.zoom_level_combo.currentTextChanged.connect(self.set_canvas_zoom_percent)
