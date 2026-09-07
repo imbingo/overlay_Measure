@@ -50,7 +50,7 @@ try {
     if (-not (Test-Path $PackagedExe)) {
         throw "Packaged executable was not found: $PackagedExe"
     }
-    $Smoke = Start-Process -FilePath $PackagedExe -ArgumentList "--smoke-test" -Wait -PassThru
+    $Smoke = Start-Process -FilePath $PackagedExe -ArgumentList "--smoke-test" -WindowStyle Hidden -Wait -PassThru
     if ($Smoke.ExitCode -ne 0) {
         throw "Packaged smoke test failed with exit code $($Smoke.ExitCode)."
     }

@@ -175,6 +175,8 @@ class MainWindowStateMixin:
             self.side_tabs.setTabEnabled(3, engineering)
             self.side_tabs.setTabEnabled(4, engineering)
             self.save_recipe_btn.setEnabled(engineering and not self._calculation_running)
+            self.upper_canvas.image_drop_enabled = not self._calculation_running
+            self.lower_canvas.image_drop_enabled = not self._calculation_running
             self.recipe_manage_action.setEnabled(engineering and not self._calculation_running)
             self.save_recipe_action.setEnabled(engineering and not self._calculation_running)
             self.analyze_roi_btn.setEnabled(

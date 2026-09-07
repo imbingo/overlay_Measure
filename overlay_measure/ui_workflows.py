@@ -804,6 +804,26 @@ class MainWindowWorkflowMixin:
         def calculate_batch_overlays(self):
             return self._start_measurement_job()
 
+        def import_dropped_image(self, path: str, layer: str):
+            if self._calculation_running:
+                self._append_log("正在计算，请等待结束后导入图像。")
+                return
+            if self.config.mode != "Dual Image":
+                layer = "upper"
+            mark_id = self._current_mark_id()
+            try:
+                image = load_image(path)
+                self._ensure_mark_runtime(mark_id)
+                self._switch_to_single_measurement_after_top_import()
+                self._set_image_for_layer(mark_id, layer, image, "single")
+                self._invalidate_image_dependent_results(mark_id, layer)
+                self._sync_current_mark_images()
+                self._refresh_auto_selection_combos()
+                self._append_log(f"已拖入{'上层/单图' if layer == 'upper' else '下层'}：{Path(path).name}")
+            except Exception as exc:
+                QMessageBox.critical(self, "导入失败", str(exc))
+            self._refresh_all_widgets()
+
         def import_upper_image(self):
             mark_id = self._current_mark_id()
             path, _ = QFileDialog.getOpenFileName(

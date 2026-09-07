@@ -51,6 +51,8 @@ def _algorithm_path_for_detection(detection: DetectionResult, workflow: str = "M
         return "自动识别 → Otsu阈值/闭合轮廓候选 → 候选中心 → 中心差计算"
 
     roi_type = detection.shape_params.get("roi_type", "ROI")
+    if detection.shape_params.get("closed_edge_selection"):
+        return f"手动ROI({roi_type}) → 完整闭合边界/光晕筛选 → 梯度峰亚像素定位 → {detection.fitting_mode}拟合 → 物理尺寸换算"
     if detection.fitting_mode == "CaliperCircle":
         return "手动ROI → 三点/卡尺圆初始化 → 径向灰度峰值找边 → 同一圆周边缘筛选 → RANSAC圆拟合+稳健平均圆 → 中心差计算"
     if detection.fitting_mode == "RegionCenter":
@@ -100,6 +102,7 @@ def _fit_to_detection(
         "roi_target_edge": getattr(roi, "target_edge", "All Edges"),
         "roi_angle_deg": float(getattr(roi, "angle_deg", 0.0)),
         "use_ransac": bool(use_ransac),
+        "closed_edge_selection": "闭合边缘筛选" in warning,
     }
     ellipse_metrics = {}
     if "radius_px" in fit.shape_params or fit.mode in {"Circle", "EdgeCenter"}:

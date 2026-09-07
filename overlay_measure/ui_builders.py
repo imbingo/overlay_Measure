@@ -1085,6 +1085,8 @@ class MainWindowBuilderMixin:
                 widget.valueChanged.connect(self.on_roi_parameter_edited)
             self.three_point_circle_btn.toggled.connect(self.on_three_point_circle_toggled)
             self.upper_canvas.roiChanged.connect(self.set_roi)
+            self.upper_canvas.imageDropped.connect(lambda path: self.import_dropped_image(path, "upper"))
+            self.lower_canvas.imageDropped.connect(lambda path: self.import_dropped_image(path, "lower"))
             self.lower_canvas.roiChanged.connect(self.set_roi)
             self.upper_canvas.roiEditCommitted.connect(self.commit_canvas_roi_edit)
             self.lower_canvas.roiEditCommitted.connect(self.commit_canvas_roi_edit)

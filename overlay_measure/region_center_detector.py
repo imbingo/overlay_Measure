@@ -48,6 +48,10 @@ def _outer_roi_mask(shape: Tuple[int, int], roi: Roi) -> tuple[np.ndarray, tuple
     if typ in {"Circle", "Annulus", "Caliper Circle"}:
         radius = max(1, int(round(r.outer_radius())))
         cv2.circle(mask, (int(round(local_cx)), int(round(local_cy))), radius, 255, -1)
+    elif typ == "Ellipse":
+        yy, xx = np.mgrid[y0:y1, x0:x1]
+        mask[:] = (r.contains_points(np.column_stack((xx.ravel(), yy.ravel())))
+                   .reshape(h, w).astype(np.uint8) * 255)
     elif typ == "Rectangular Ring":
         theta = np.deg2rad(float(getattr(r, "angle_deg", 0.0)))
         ct, st = np.cos(theta), np.sin(theta)
@@ -227,7 +231,8 @@ def _segment_primary_candidate(
     _, bright = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
     _, dark = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
     rcx, rcy = r.center()[0] - x0, r.center()[1] - y0
-    requested = getattr(params, "polarity", "Auto")
+    # Directional caliper polarity does not define a closed region's polarity.
+    requested = "Auto"
     candidates: list[RegionCandidate | None] = []
     if requested == "Dark to Bright":
         candidates.append(_candidate_from_binary(dark, roi_mask, "暗目标", (rcx, rcy), expected_shape))
@@ -255,16 +260,36 @@ def detect_primary_contour_edges(
     expected_shape: str = "Any",
 ) -> SubpixelEdges:
     """Select one connected target, then refine only its contour to subpixels."""
-    candidate, (x0, y0, _x1, _y1), _contrast = _segment_primary_candidate(
-        gray,
-        roi,
-        params,
-        expected_shape,
-    )
+    from .closed_edge_detector import closed_round_edges
+
+    round_roi = roi.roi_type in {"Circle", "Ellipse"}
+    if round_roi:
+        ring_edges = closed_round_edges(gray, roi, params, require_nested=True)
+        if ring_edges is not None:
+            return ring_edges
+    try:
+        candidate, (x0, y0, _x1, _y1), _contrast = _segment_primary_candidate(
+            gray, roi, params, expected_shape,
+        )
+    except ValueError:
+        fallback = closed_round_edges(gray, roi, params) if round_roi else None
+        if fallback is not None:
+            return fallback
+        raise
     contour_global = candidate.contour.reshape(-1, 2).astype(np.float64)
     contour_global[:, 0] += x0
     contour_global[:, 1] += y0
     points, gradients = refine_contour_edges(gray, contour_global, params)
+    if round_roi:
+        alternative = closed_round_edges(gray, roi, params)
+        if alternative is not None:
+            # A threshold contour can sit on the weak outer halo. Replace it
+            # only with a substantially stronger, nearby complete boundary.
+            near = np.linalg.norm(np.mean(alternative.points_xy, axis=0)
+                                  - np.mean(contour_global, axis=0)) < 0.1 * max(roi.w, roi.h)
+            strength = float(np.median(gradients)) if len(gradients) else 0.0
+            if near and float(np.median(alternative.gradients)) > 2.0 * strength:
+                return alternative
     if len(points) < 3:
         raise ValueError("主目标轮廓的有效亚像素边缘点不足")
     return SubpixelEdges(

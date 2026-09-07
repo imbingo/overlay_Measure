@@ -163,6 +163,7 @@ class CollapsibleSection(QWidget):
 
 
 class ImageCanvas(QLabel):
+    imageDropped = Signal(str)
     roiChanged = Signal(str, str, object)  # mark_id, layer, Roi
     roiEditCommitted = Signal(str, str, str, object)  # mark_id, layer, stable roi_id, Roi
     roiSelected = Signal(str, str, str)  # mark_id, layer, stable roi_id
@@ -175,6 +176,8 @@ class ImageCanvas(QLabel):
     def __init__(self, title: str, fixed_layer: Optional[str] = None, parent=None):
         super().__init__(parent)
         self.title = title
+        self.setAcceptDrops(True)
+        self.image_drop_enabled = True
         self.fixed_layer = fixed_layer
         self.setMinimumSize(360, 250)
         self.setAlignment(Qt.AlignCenter)
@@ -253,6 +256,37 @@ class ImageCanvas(QLabel):
         self.pan_start_y = 0.0
         self.setText("等待导入图像")
         self.setStyleSheet("QLabel { background: #252930; color: #F5F6F8; border: 1px solid #363C45; border-radius: 6px; }")
+
+    def _drop_path(self, event):
+        urls = event.mimeData().urls()
+        if not self.image_drop_enabled or len(urls) != 1 or not urls[0].isLocalFile():
+            return None
+        path = Path(urls[0].toLocalFile())
+        return str(path) if path.is_file() and path.suffix.lower() in SUPPORTED_EXTENSIONS else None
+
+    def dragEnterEvent(self, event):
+        if self._drop_path(event):
+            event.setDropAction(Qt.CopyAction)
+            event.accept()
+        else:
+            event.ignore()
+            self.interactionMessage.emit("请拖入一张支持的本地图像；计算期间不可导入。")
+
+    def dragMoveEvent(self, event):
+        if self._drop_path(event):
+            event.setDropAction(Qt.CopyAction)
+            event.accept()
+        else:
+            event.ignore()
+
+    def dropEvent(self, event):
+        path = self._drop_path(event)
+        if path:
+            event.setDropAction(Qt.CopyAction)
+            event.accept()
+            self.imageDropped.emit(path)
+        else:
+            event.ignore()
 
     def set_image(self, image: Optional[ImageData]):
         # UI refreshes frequently when ROI selection changes. Rebinding the exact
