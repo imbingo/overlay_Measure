@@ -13,6 +13,11 @@ $ReleaseDir = Join-Path $Root "release"
 
 Push-Location $Root
 try {
+    $RuntimeCheck = (& $Python -c "import struct, sys; bitness = struct.calcsize('P') * 8; supported = (3, 10) <= sys.version_info[:2] < (3, 14) and bitness == 64; print('supported' if supported else f'unsupported:{sys.version.split()[0]}:{bitness}-bit')").Trim()
+    if ($LASTEXITCODE -ne 0 -or $RuntimeCheck -ne "supported") {
+        throw "Release builds require 64-bit Python 3.10-3.13. Detected: $RuntimeCheck"
+    }
+
     $Version = (& $Python -c "from overlay_measure import __version__; print(__version__)").Trim()
     if ($LASTEXITCODE -ne 0 -or -not $Version) {
         throw "Unable to read the application version."
